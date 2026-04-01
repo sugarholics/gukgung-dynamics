@@ -51,6 +51,7 @@ const DEFAULT_PARAMS = {
   // 탄성 특성
   elasticModulus: 45e9,    // FRP/카본 복합재 탄성계수 (Pa) ~45 GPa
   dampingRatio: 0.02,     // 감쇠비
+  limbAsymmetryRatio: 1.0, // 하채/상채 강성비 (1.0=대칭, 0.8~1.5)
 
   // 시위 (독립 변수)
   stringLength: 1.08,     // 시위 전체 길이 (m) — 양쪽 고리 포함
@@ -72,6 +73,11 @@ const DEFAULT_PARAMS = {
   // 줌통 EI = 활채 근부 EI × gripStiffnessRatio
   // 실제 개량궁: FRP/카본 보강으로 활채보다 10~30배 강성
   gripStiffnessRatio: 15, // 줌통/활채 강성비
+
+  // 접촉점 오프셋 (사법 모델링)
+  nockingOffset: 0.005,   // 오니 y오프셋 (m) — 시위 힘 중심보다 위 (화살대 직경)
+  pullOffset: -0.015,     // 당김점 y오프셋 (m) — 오니보다 아래 (엄지 위치)
+  restOffsetY: 0.003,     // 화살걸이 y오프셋 (m) — 줌통 중심보다 위
 };
 
 // ─── 연속 보 EI(s) 프로파일 및 자연곡률 κ₀(s) ───
@@ -80,12 +86,13 @@ const DEFAULT_PARAMS = {
 
 // 한쪽 반(grip center → limb tip)에 대한 EI, 두께, 폭, 자연곡률 프로파일
 // sHalf: 그립 중심(0)에서의 호 길이. 0 = 그립 중심, halfGrip = 줌통 끝, halfGrip + limbArcLen = 활채 끝
-function getBeamProfile(sHalf, params) {
+function getBeamProfile(sHalf, params, limbSide = 'upper') {
   const {
     gripLength, elasticModulus, limbThickness, limbWidth,
     reflexAngle, naturalCurvature
   } = params;
   const gripStiffnessRatio = params.gripStiffnessRatio || 15;
+  const asymRatio = (limbSide === 'lower') ? (params.limbAsymmetryRatio || 1.0) : 1.0;
   const halfGrip = gripLength / 2;
   const halfLen = params.bowLength / 2;
   const limbArcLen = halfLen - halfGrip - params.siyahLength;
@@ -94,19 +101,20 @@ function getBeamProfile(sHalf, params) {
   // 줌통-활채 전이 구간 (코사인 보간)
   const transitionWidth = 0.015; // 1.5cm
 
-  // 활채 두께/폭 테이퍼
+  // 활채 두께/폭 테이퍼 — 하채는 asymRatio^(1/3) 스케일
+  const thicknessScale = Math.pow(asymRatio, 1/3);
   const taperRatio = 0.55;
   function limbThicknessAt(sLimb) {
     const ratio = sLimb / limbArcLen;
-    return limbThickness * (1 - taperRatio * Math.min(ratio, 1));
+    return limbThickness * thicknessScale * (1 - taperRatio * Math.min(ratio, 1));
   }
   function limbWidthAt(sLimb) {
     const ratio = sLimb / limbArcLen;
     return limbWidth * (1 - 0.3 * Math.min(ratio, 1));
   }
 
-  // 활채 근부(줌통 접합부) EI
-  const limbRootEI = elasticModulus * limbWidth * limbThickness * limbThickness * limbThickness / 12;
+  // 활채 근부(줌통 접합부) EI — 하채는 asymRatio 적용
+  const limbRootEI = elasticModulus * limbWidth * limbThickness * limbThickness * limbThickness / 12 * asymRatio;
   const gripEI = limbRootEI * gripStiffnessRatio;
 
   let EI, h, w, kappa0;
@@ -114,7 +122,7 @@ function getBeamProfile(sHalf, params) {
   if (sHalf <= halfGrip - transitionWidth) {
     // 순수 줌통 구간
     EI = gripEI;
-    h = limbThickness * 1.3; // 줌통은 활채보다 약간 두꺼움 (렌더링용)
+    h = limbThickness * thicknessScale * 1.3; // 줌통은 활채보다 약간 두꺼움 (렌더링용)
     w = limbWidth * 1.2;
     kappa0 = 0; // 줌통 자연곡률 ≈ 0
   } else if (sHalf <= halfGrip + transitionWidth) {
@@ -125,7 +133,7 @@ function getBeamProfile(sHalf, params) {
     const limbEI_here = elasticModulus * limbWidthAt(sLimb) *
       Math.pow(limbThicknessAt(sLimb), 3) / 12;
     EI = gripEI * (1 - blend) + limbEI_here * blend;
-    h = limbThickness * 1.3 * (1 - blend) + limbThicknessAt(sLimb) * blend;
+    h = limbThickness * thicknessScale * 1.3 * (1 - blend) + limbThicknessAt(sLimb) * blend;
     w = limbWidth * 1.2 * (1 - blend) + limbWidthAt(sLimb) * blend;
     // 자연곡률도 전이
     const ratio = sLimb / limbArcLen;
@@ -150,7 +158,7 @@ function getBeamProfile(sHalf, params) {
 // kappaLoadFn: (sHalf, EI) => 하중 곡률값. 솔버가 주입하는 콜백.
 //   - Step 1 호환용: (sHalf, EI) => -loadFactor * (limbArcLen - max(0, sLimb)) / EI
 //   - Step 3 이후: (sHalf, EI) => -M(s) / EI  (변형 형상 기반 모멘트)
-function generateFullBeam(params, kappaLoadFn) {
+function generateFullBeam(params, kappaLoadFn, limbSide = 'upper') {
   const { gripLength, bowLength, siyahLength } = params;
   const gripAngle = params.gripAngle || 0;
   const gripAngleRad = (gripAngle * Math.PI) / 180;
@@ -177,7 +185,7 @@ function generateFullBeam(params, kappaLoadFn) {
   let x = 0, y = 0;
 
   points.push({ x, y, angle });
-  const profile0 = getBeamProfile(0, params);
+  const profile0 = getBeamProfile(0, params, limbSide);
   thicknesses.push(profile0.h);
   widths.push(profile0.w);
 
@@ -189,7 +197,7 @@ function generateFullBeam(params, kappaLoadFn) {
       ? (i + 0.5) * ds_grip
       : halfGrip + (i - N_grip + 0.5) * ds_limb;
 
-    const profile = getBeamProfile(sHalf, params);
+    const profile = getBeamProfile(sHalf, params, limbSide);
 
     // 하중 곡률 (솔버 콜백)
     const kappaLoad = kappaLoadFn ? kappaLoadFn(sHalf, profile.EI) : 0;
@@ -235,110 +243,166 @@ function makeLoadFactorKappaFn(params, loadFactor) {
 
 // ─── 무현(unstrung) 기준 형상 계산 ───
 // 외력 없이 자연곡률 κ₀(s)만으로 형상 결정.
-// 반환: 전체 보 좌표(상채 반쪽) + 하채 대칭 + 고자 끝점
+// 반환: 전체 보 좌표(상채/하채 독립) + 하채 대칭 + 고자 끝점
 function computeRestShape(params) {
   const { siyahLength, siyahAngle } = params;
   const siyahRad = (siyahAngle * Math.PI) / 180;
 
-  // 하중 없이 적분 → 자연곡률만 반영
-  const beam = generateFullBeam(params, null);
+  // 상채/하채 독립 적분 → 비대칭 강성 지원
+  const beamUpper = generateFullBeam(params, null, 'upper');
+  const beamLower = generateFullBeam(params, null, 'lower');
 
-  // 고자 끝점 계산 (활채 끝에서 siyahAngle만큼 꺾임)
-  const limbEnd = beam.points[beam.points.length - 1];
-  const endAngle = limbEnd.angle;
-  const tangent = { x: Math.cos(endAngle), y: Math.sin(endAngle) };
-  const cos = Math.cos(siyahRad);
-  const sin = Math.sin(siyahRad);
-  const siyahDir = {
-    x: tangent.x * cos - tangent.y * sin,
-    y: tangent.y * cos + tangent.x * sin,
+  // 상채 고자 끝점 계산 (활채 끝에서 siyahAngle만큼 꺾임)
+  const limbEndUpper = beamUpper.points[beamUpper.points.length - 1];
+  const endAngleUpper = limbEndUpper.angle;
+  const tangentUpper = { x: Math.cos(endAngleUpper), y: Math.sin(endAngleUpper) };
+  const cosS = Math.cos(siyahRad);
+  const sinS = Math.sin(siyahRad);
+  const siyahDirUpper = {
+    x: tangentUpper.x * cosS - tangentUpper.y * sinS,
+    y: tangentUpper.y * cosS + tangentUpper.x * sinS,
   };
-  const norm = Math.sqrt(siyahDir.x ** 2 + siyahDir.y ** 2);
-  siyahDir.x /= norm;
-  siyahDir.y /= norm;
+  const normUpper = Math.sqrt(siyahDirUpper.x ** 2 + siyahDirUpper.y ** 2);
+  siyahDirUpper.x /= normUpper;
+  siyahDirUpper.y /= normUpper;
 
-  const dorae = { x: limbEnd.x, y: limbEnd.y };
-  const yangyangi = {
-    x: dorae.x + siyahDir.x * siyahLength,
-    y: dorae.y + siyahDir.y * siyahLength,
+  const doraeTop = { x: limbEndUpper.x, y: limbEndUpper.y };
+  const yangyangiTop = {
+    x: doraeTop.x + siyahDirUpper.x * siyahLength,
+    y: doraeTop.y + siyahDirUpper.y * siyahLength,
   };
 
-  // 전체 활 포인트 (하채 + 그립 + 상채) — 렌더링용 THREE.Vector3
+  // 하채 고자 끝점 계산 (beamLower는 +y 방향으로 적분됨 → y 부호 반전)
+  const limbEndLower = beamLower.points[beamLower.points.length - 1];
+  const endAngleLower = limbEndLower.angle;
+  const tangentLower = { x: Math.cos(endAngleLower), y: Math.sin(endAngleLower) };
+  const siyahDirLower_raw = {
+    x: tangentLower.x * cosS - tangentLower.y * sinS,
+    y: tangentLower.y * cosS + tangentLower.x * sinS,
+  };
+  const normLower = Math.sqrt(siyahDirLower_raw.x ** 2 + siyahDirLower_raw.y ** 2);
+  siyahDirLower_raw.x /= normLower;
+  siyahDirLower_raw.y /= normLower;
+
+  // 적분 결과의 y 부호를 반전하여 실제 하채 위치 산출
+  const doraeBottom = { x: limbEndLower.x, y: -limbEndLower.y };
+  const yangyangiBottom = {
+    x: limbEndLower.x + siyahDirLower_raw.x * siyahLength,
+    y: -(limbEndLower.y + siyahDirLower_raw.y * siyahLength),
+  };
+
+  // 전체 활 포인트 (하채 + 그립 + 상채) — 렌더링용
   const restPoints = [];
-  // 하채 (y반전 역순)
-  for (let i = beam.points.length - 1; i > 0; i--) {
-    const p = beam.points[i];
+  // 하채 (beamLower 역순, y 반전)
+  for (let i = beamLower.points.length - 1; i > 0; i--) {
+    const p = beamLower.points[i];
     restPoints.push({ x: p.x, y: -p.y });
   }
   // 그립 중심
-  restPoints.push({ x: beam.points[0].x, y: beam.points[0].y });
+  restPoints.push({ x: beamUpper.points[0].x, y: beamUpper.points[0].y });
   // 상채
-  for (let i = 1; i < beam.points.length; i++) {
-    restPoints.push({ x: beam.points[i].x, y: beam.points[i].y });
+  for (let i = 1; i < beamUpper.points.length; i++) {
+    restPoints.push({ x: beamUpper.points[i].x, y: beamUpper.points[i].y });
   }
 
   // 고자 포인트 (상하)
-  const siyahTop = [dorae, yangyangi];
-  const siyahBottom = [
-    { x: dorae.x, y: -dorae.y },
-    { x: yangyangi.x, y: -yangyangi.y },
-  ];
+  const siyahTop = [doraeTop, yangyangiTop];
+  const siyahBottom = [doraeBottom, yangyangiBottom];
 
-  return { beam, restPoints, siyahTop, siyahBottom, dorae, yangyangi };
+  // 레거시 호환: beam = beamUpper, dorae/yangyangi = 상채 값
+  const beam = beamUpper;
+  const dorae = doraeTop;
+  const yangyangi = yangyangiTop;
+
+  return {
+    beamUpper, beamLower,
+    beam,         // legacy alias → beamUpper
+    restPoints,
+    siyahTop, siyahBottom,
+    doraeTop, doraeBottom,
+    yangyangiTop, yangyangiBottom,
+    dorae, yangyangi,  // legacy aliases → top values
+  };
 }
 
 // ─── 주어진 하중에서 활 형상 + 시위 길이 계산 (솔버 내부 함수) ───
 // 연속 보 모델: generateFullBeam으로 그립+활채 일체 적분 후 고자 좌표 계산
+// 상채/하채 독립 적분으로 비대칭 강성 지원
 function computeBowState(params, loadFactor) {
   const { bowLength, gripLength, siyahLength, siyahAngle } = params;
   const halfLen = bowLength / 2;
   const limbArcLen = halfLen - gripLength / 2 - siyahLength;
   const siyahRad = (siyahAngle * Math.PI) / 180;
 
-  // 연속 보 적분 (그립 중심 → 상채 끝)
+  // 상채/하채 독립 적분
   const kappaFn = makeLoadFactorKappaFn(params, loadFactor);
-  const beam = generateFullBeam(params, kappaFn);
+  const beamUpper = generateFullBeam(params, kappaFn, 'upper');
+  const beamLower = generateFullBeam(params, kappaFn, 'lower');
 
-  // 활채 끝점 = beam.points 마지막
-  const limbEnd = beam.points[beam.points.length - 1];
-  const endAngle = limbEnd.angle;
-  const tangent = { x: Math.cos(endAngle), y: Math.sin(endAngle) };
-
-  // 고자 방향 (활채 접선에서 siyahAngle만큼 앞쪽으로 꺾임)
-  const cos = Math.cos(siyahRad);
-  const sin = Math.sin(siyahRad);
-  const siyahDir = {
-    x: tangent.x * cos - tangent.y * sin,
-    y: tangent.y * cos + tangent.x * sin,
+  // 상채 고자 끝점 계산
+  const limbEndUpper = beamUpper.points[beamUpper.points.length - 1];
+  const endAngleUpper = limbEndUpper.angle;
+  const tangentUpper = { x: Math.cos(endAngleUpper), y: Math.sin(endAngleUpper) };
+  const cosS = Math.cos(siyahRad);
+  const sinS = Math.sin(siyahRad);
+  const siyahDirUpper = {
+    x: tangentUpper.x * cosS - tangentUpper.y * sinS,
+    y: tangentUpper.y * cosS + tangentUpper.x * sinS,
   };
-  const norm = Math.sqrt(siyahDir.x ** 2 + siyahDir.y ** 2);
-  siyahDir.x /= norm;
-  siyahDir.y /= norm;
+  const normUpper = Math.sqrt(siyahDirUpper.x ** 2 + siyahDirUpper.y ** 2);
+  siyahDirUpper.x /= normUpper;
+  siyahDirUpper.y /= normUpper;
 
-  // 도고자 = 활채 끝점, 양양고자 = 고자 끝점
-  const dorae = { x: limbEnd.x, y: limbEnd.y };
-  const yangyangi = {
-    x: dorae.x + siyahDir.x * siyahLength,
-    y: dorae.y + siyahDir.y * siyahLength,
+  const doraeTop = { x: limbEndUpper.x, y: limbEndUpper.y };
+  const yangyangiTop = {
+    x: doraeTop.x + siyahDirUpper.x * siyahLength,
+    y: doraeTop.y + siyahDirUpper.y * siyahLength,
   };
 
-  // 시위 경로에서 고자 구간 길이 = siyahLength (강체이므로 항상 동일)
-  const doraeBottom = { x: dorae.x, y: -dorae.y };
+  // 하채 고자 끝점 계산 (beamLower는 +y 방향 적분 → y 부호 반전)
+  const limbEndLower = beamLower.points[beamLower.points.length - 1];
+  const endAngleLower = limbEndLower.angle;
+  const tangentLower = { x: Math.cos(endAngleLower), y: Math.sin(endAngleLower) };
+  const siyahDirLower_raw = {
+    x: tangentLower.x * cosS - tangentLower.y * sinS,
+    y: tangentLower.y * cosS + tangentLower.x * sinS,
+  };
+  const normLower = Math.sqrt(siyahDirLower_raw.x ** 2 + siyahDirLower_raw.y ** 2);
+  siyahDirLower_raw.x /= normLower;
+  siyahDirLower_raw.y /= normLower;
+
+  // 하채 물리 좌표: beamLower는 +y 적분 → y 반전으로 실제 -y 위치
+  const doraeBottom = { x: limbEndLower.x, y: -limbEndLower.y };
+  // 하채 siyah 방향: 적분 공간의 방향을 y반전하여 실제 물리 방향으로
+  const siyahDirBottom = { x: siyahDirLower_raw.x, y: -siyahDirLower_raw.y };
+  const yangyangiBottom = {
+    x: doraeBottom.x + siyahDirBottom.x * siyahLength,
+    y: doraeBottom.y + siyahDirBottom.y * siyahLength,
+  };
+
+  // 시위 길이 계산: 상채 도고자 ↔ 하채 도고자 거리
   const doraeDist = Math.sqrt(
-    (dorae.x - doraeBottom.x) ** 2 + (dorae.y - doraeBottom.y) ** 2
+    (doraeTop.x - doraeBottom.x) ** 2 + (doraeTop.y - doraeBottom.y) ** 2
   );
-
   const stringLenAtBrace = 2 * siyahLength + doraeDist;
 
-  // 호환성: limb 객체를 beam에서 활채 구간만 추출하여 구성
-  // beam.points[0]=그립중심, [N_grip]=줌통끝(=활채시작), [N_grip+N_limb]=활채끝
-  const limbPoints = beam.points.slice(beam.N_grip);
-  const limbThicknesses = beam.thicknesses.slice(beam.N_grip);
-  const limbWidths = beam.widths.slice(beam.N_grip);
+  // 호환성: limb 객체를 beamUpper에서 활채 구간만 추출하여 구성
+  const limbPoints = beamUpper.points.slice(beamUpper.N_grip);
+  const limbThicknesses = beamUpper.thicknesses.slice(beamUpper.N_grip);
+  const limbWidths = beamUpper.widths.slice(beamUpper.N_grip);
   const limb = { points: limbPoints, thicknesses: limbThicknesses, widths: limbWidths };
 
+  const beam = beamUpper;
+  const dorae = doraeTop;
+  const yangyangi = yangyangiTop;
+  const siyahDir = siyahDirUpper;
+
   return {
-    limb, beam, dorae, yangyangi, siyahDir, doraeBottom,
+    limb, beam, beamUpper, beamLower,
+    dorae, yangyangi, siyahDir,
+    doraeTop, doraeBottom, yangyangiTop, yangyangiBottom,
+    siyahDirTop: siyahDirUpper, siyahDirBottom,
+    doraeBottom_actual: doraeBottom, // computeNockX/generateBowGeometry에서 통일된 이름으로 접근
     doraeDist, stringLenAtBrace, limbArcLen,
   };
 }
@@ -360,121 +424,157 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
   const RELAX = 0.5;
   const CONV_TOL = options.convergenceTol || 1e-5;
 
-  // 초기 형상: 제공된 initialBeam 또는 무현 상태
-  let prevBeam = options.initialBeam || generateFullBeam(params, null);
+  // 초기 형상: 상채/하채 독립 초기화
+  // backward compat: options.initialBeam은 상채 초기값으로 사용
+  let prevBeamUpper = options.initialBeamUpper || options.initialBeam || generateFullBeam(params, null, 'upper');
+  let prevBeamLower = options.initialBeamLower || generateFullBeam(params, null, 'lower');
 
-  for (let iter = 0; iter < INNER_ITER; iter++) {
-    // 현재 형상에서 고자 끝점 계산
-    const limbEnd = prevBeam.points[prevBeam.points.length - 1];
+  // 고자 좌표 계산 헬퍼 (beam의 끝점에서 siyah 방향 적분)
+  function computeSiyahFromBeam(beam) {
+    const limbEnd = beam.points[beam.points.length - 1];
     const endAngle = limbEnd.angle;
     const tangent = { x: Math.cos(endAngle), y: Math.sin(endAngle) };
-    const cos_s = Math.cos(siyahRad);
-    const sin_s = Math.sin(siyahRad);
-    let siyahDir = {
-      x: tangent.x * cos_s - tangent.y * sin_s,
-      y: tangent.y * cos_s + tangent.x * sin_s,
+    const cosS = Math.cos(siyahRad);
+    const sinS = Math.sin(siyahRad);
+    let dir = {
+      x: tangent.x * cosS - tangent.y * sinS,
+      y: tangent.y * cosS + tangent.x * sinS,
     };
-    const norm = Math.sqrt(siyahDir.x ** 2 + siyahDir.y ** 2);
-    siyahDir.x /= norm;
-    siyahDir.y /= norm;
-
+    const norm = Math.sqrt(dir.x ** 2 + dir.y ** 2);
+    dir.x /= norm;
+    dir.y /= norm;
     const dorae = { x: limbEnd.x, y: limbEnd.y };
     const yangyangi = {
-      x: dorae.x + siyahDir.x * siyahLength,
-      y: dorae.y + siyahDir.y * siyahLength,
+      x: dorae.x + dir.x * siyahLength,
+      y: dorae.y + dir.y * siyahLength,
     };
+    return { dorae, yangyangi, siyahDir: dir };
+  }
 
-    // 시위 힘의 작용선: forcePoint(nock/당김점) → yangyangi (또는 dorae 감김시)
-    // 간단화: 상채 방향 시위 = forcePoint → yangyangi 방향의 장력 T
-    const dx = yangyangi.x - forcePoint.x;
-    const dy = yangyangi.y - forcePoint.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 1e-8) break;
-    // 시위 방향 단위벡터 (forcePoint → yangyangi)
-    const ux = dx / dist;
-    const uy = dy / dist;
+  for (let iter = 0; iter < INNER_ITER; iter++) {
+    // ── 상채: forcePoint → yangyangiTop 방향 시위 ──
+    const { yangyangi: yangyangiTop_iter } = computeSiyahFromBeam(prevBeamUpper);
 
-    // 힘 작용선: forcePoint를 지나고 방향 (ux, uy)인 직선
-    // 보 위의 점 (px, py)에서 이 직선까지의 부호 있는 수직거리:
-    // d⊥ = (px - forcePoint.x) × uy - (py - forcePoint.y) × ux
-    // 모멘트 M = T × d⊥ (부호: 사대 방향 휨 = 음)
+    const dxU = yangyangiTop_iter.x - forcePoint.x;
+    const dyU = yangyangiTop_iter.y - forcePoint.y;
+    const distU = Math.sqrt(dxU * dxU + dyU * dyU);
+    if (distU < 1e-8) break;
+    const ux_upper = dxU / distU;
+    const uy_upper = dyU / distU;
 
-    const kappaFn = function(sHalf, EI) {
-      // 보 위의 점 좌표 추정: prevBeam에서 보간
-      const totalPts = prevBeam.points.length;
+    const kappaFnUpper = function(sHalf, EI) {
+      const totalPts = prevBeamUpper.points.length;
       const totalHalf = halfGrip + limbArcLen;
       const idx = sHalf / totalHalf * (totalPts - 1);
       const i0 = Math.min(Math.floor(idx), totalPts - 2);
       const frac = idx - i0;
-      const px = prevBeam.points[i0].x * (1 - frac) + prevBeam.points[i0 + 1].x * frac;
-      const py = prevBeam.points[i0].y * (1 - frac) + prevBeam.points[i0 + 1].y * frac;
-
-      // 수직거리: 힘 작용선(nock→yangyangi)에서 보 위 점까지의 부호 있는 거리
-      // d_perp < 0 → 보가 힘 작용선의 오른쪽 → 시위 장력이 사대 방향으로 휨 유도
-      const d_perp = (px - forcePoint.x) * uy - (py - forcePoint.y) * ux;
-
-      // 모멘트 = T × d⊥, κ = M/EI (부호 그대로 — d_perp가 올바른 부호 포함)
-      const moment = T * d_perp;
-      return moment / EI;
+      const px = prevBeamUpper.points[i0].x * (1 - frac) + prevBeamUpper.points[i0 + 1].x * frac;
+      const py = prevBeamUpper.points[i0].y * (1 - frac) + prevBeamUpper.points[i0 + 1].y * frac;
+      // 상채 물리적 위치 = (px, py) 그대로
+      const d_perp = (px - forcePoint.x) * uy_upper - (py - forcePoint.y) * ux_upper;
+      return (T * d_perp) / EI;
     };
 
-    const newBeam = generateFullBeam(params, kappaFn);
+    // ── 하채: 적분 좌표계(+y)에서 힘 계산 ──
+    // 하채 beam은 +y 방향 적분이므로, forcePoint를 y반전하여 적분 좌표계에서 계산
+    // 이렇게 하면 상채와 동일한 굽힘 방향이 보장됨
+    const { yangyangi: yangyangiLower_raw } = computeSiyahFromBeam(prevBeamLower);
+    // 하채 양양고자 물리적 위치는 y반전 (조립용으로 저장)
+    const yangyangiBottom_iter = { x: yangyangiLower_raw.x, y: -yangyangiLower_raw.y };
 
-    // 수렴 체크: 형상 최대 변화량
+    // 적분 좌표계에서의 forcePoint (y 반전)
+    const forcePointMirrored = { x: forcePoint.x, y: -forcePoint.y };
+    const dxL = yangyangiLower_raw.x - forcePointMirrored.x;
+    const dyL = yangyangiLower_raw.y - forcePointMirrored.y;
+    const distL = Math.sqrt(dxL * dxL + dyL * dyL);
+    if (distL < 1e-8) break;
+    const ux_lower = dxL / distL;
+    const uy_lower = dyL / distL;
+
+    const kappaFnLower = function(sHalf, EI) {
+      const totalPts = prevBeamLower.points.length;
+      const totalHalf = halfGrip + limbArcLen;
+      const idx = sHalf / totalHalf * (totalPts - 1);
+      const i0 = Math.min(Math.floor(idx), totalPts - 2);
+      const frac = idx - i0;
+      const px = prevBeamLower.points[i0].x * (1 - frac) + prevBeamLower.points[i0 + 1].x * frac;
+      const py = prevBeamLower.points[i0].y * (1 - frac) + prevBeamLower.points[i0 + 1].y * frac;
+      // 적분 좌표계(+y)에서 직접 계산 — forcePointMirrored 사용
+      const d_perp = (px - forcePointMirrored.x) * uy_lower - (py - forcePointMirrored.y) * ux_lower;
+      return (T * d_perp) / EI;
+    };
+
+    const newBeamUpper = generateFullBeam(params, kappaFnUpper, 'upper');
+    const newBeamLower = generateFullBeam(params, kappaFnLower, 'lower');
+
+    // 수렴 체크: 상채/하채 모두 확인
     let maxDelta = 0;
-    for (let i = 0; i < newBeam.points.length; i++) {
-      const dx = newBeam.points[i].x - prevBeam.points[i].x;
-      const dy = newBeam.points[i].y - prevBeam.points[i].y;
-      maxDelta = Math.max(maxDelta, Math.sqrt(dx * dx + dy * dy));
+    for (let i = 0; i < newBeamUpper.points.length; i++) {
+      const dxU2 = newBeamUpper.points[i].x - prevBeamUpper.points[i].x;
+      const dyU2 = newBeamUpper.points[i].y - prevBeamUpper.points[i].y;
+      maxDelta = Math.max(maxDelta, Math.sqrt(dxU2 * dxU2 + dyU2 * dyU2));
+    }
+    for (let i = 0; i < newBeamLower.points.length; i++) {
+      const dxL2 = newBeamLower.points[i].x - prevBeamLower.points[i].x;
+      const dyL2 = newBeamLower.points[i].y - prevBeamLower.points[i].y;
+      maxDelta = Math.max(maxDelta, Math.sqrt(dxL2 * dxL2 + dyL2 * dyL2));
     }
 
-    // Relaxation: 이전 형상과 가중평균 (마지막 반복 제외)
+    // Relaxation: 마지막 반복 제외
     if (iter < INNER_ITER - 1) {
-      for (let i = 0; i < newBeam.points.length; i++) {
-        newBeam.points[i].x = prevBeam.points[i].x * RELAX + newBeam.points[i].x * (1 - RELAX);
-        newBeam.points[i].y = prevBeam.points[i].y * RELAX + newBeam.points[i].y * (1 - RELAX);
-        newBeam.points[i].angle = prevBeam.points[i].angle * RELAX + newBeam.points[i].angle * (1 - RELAX);
+      for (let i = 0; i < newBeamUpper.points.length; i++) {
+        newBeamUpper.points[i].x = prevBeamUpper.points[i].x * RELAX + newBeamUpper.points[i].x * (1 - RELAX);
+        newBeamUpper.points[i].y = prevBeamUpper.points[i].y * RELAX + newBeamUpper.points[i].y * (1 - RELAX);
+        newBeamUpper.points[i].angle = prevBeamUpper.points[i].angle * RELAX + newBeamUpper.points[i].angle * (1 - RELAX);
+      }
+      for (let i = 0; i < newBeamLower.points.length; i++) {
+        newBeamLower.points[i].x = prevBeamLower.points[i].x * RELAX + newBeamLower.points[i].x * (1 - RELAX);
+        newBeamLower.points[i].y = prevBeamLower.points[i].y * RELAX + newBeamLower.points[i].y * (1 - RELAX);
+        newBeamLower.points[i].angle = prevBeamLower.points[i].angle * RELAX + newBeamLower.points[i].angle * (1 - RELAX);
       }
     }
 
-    prevBeam = newBeam;
+    prevBeamUpper = newBeamUpper;
+    prevBeamLower = newBeamLower;
     if (maxDelta < CONV_TOL) break; // 조기 수렴
   }
 
-  // 최종 형상에서 고자 좌표 계산
-  const beam = prevBeam;
-  const limbEnd = beam.points[beam.points.length - 1];
-  const endAngle = limbEnd.angle;
-  const tangent = { x: Math.cos(endAngle), y: Math.sin(endAngle) };
-  const cos_s = Math.cos(siyahRad);
-  const sin_s = Math.sin(siyahRad);
-  const siyahDir = {
-    x: tangent.x * cos_s - tangent.y * sin_s,
-    y: tangent.y * cos_s + tangent.x * sin_s,
-  };
-  const normF = Math.sqrt(siyahDir.x ** 2 + siyahDir.y ** 2);
-  siyahDir.x /= normF;
-  siyahDir.y /= normF;
+  // 최종 형상에서 고자 좌표 계산 — 상채/하채 독립
+  const beamUpper = prevBeamUpper;
+  const beamLower = prevBeamLower;
 
-  const dorae = { x: limbEnd.x, y: limbEnd.y };
-  const yangyangi = {
-    x: dorae.x + siyahDir.x * siyahLength,
-    y: dorae.y + siyahDir.y * siyahLength,
-  };
-  const doraeBottom = { x: dorae.x, y: -dorae.y };
+  const { dorae: doraeTop, yangyangi: yangyangiTop, siyahDir: siyahDirTop } = computeSiyahFromBeam(beamUpper);
+
+  // 하채: beam 적분 결과에서 y반전으로 실제 물리 좌표 산출
+  const { dorae: doraeTop_lower, yangyangi: yangyangiTop_lower, siyahDir: siyahDirTop_lower } = computeSiyahFromBeam(beamLower);
+  const doraeBottom_actual = { x: doraeTop_lower.x, y: -doraeTop_lower.y };
+  const yangyangiBottom = { x: yangyangiTop_lower.x, y: -yangyangiTop_lower.y };
+  const siyahDirBottom = { x: siyahDirTop_lower.x, y: -siyahDirTop_lower.y };
+
+  // backward compat: dorae/yangyangi/siyahDir/doraeBottom = 상채 기준
+  const beam = beamUpper;
+  const dorae = doraeTop;
+  const yangyangi = yangyangiTop;
+  const siyahDir = siyahDirTop;
+  const doraeBottom = { x: doraeTop.x, y: -doraeTop.y }; // 상채 y반전 (레거시)
+
+  // doraeDist: 상채 도고자 ↔ 하채 도고자 실제 거리 (asymmetric 고려)
   const doraeDist = Math.sqrt(
-    (dorae.x - doraeBottom.x) ** 2 + (dorae.y - doraeBottom.y) ** 2
+    (doraeTop.x - doraeBottom_actual.x) ** 2 + (doraeTop.y - doraeBottom_actual.y) ** 2
   );
   const stringLenAtBrace = 2 * siyahLength + doraeDist;
 
-  // limb 호환 객체
-  const limbPoints = beam.points.slice(beam.N_grip);
-  const limbThicknesses = beam.thicknesses.slice(beam.N_grip);
-  const limbWidths = beam.widths.slice(beam.N_grip);
+  // limb 호환 객체 (상채 기준 — backward compat)
+  const limbPoints = beamUpper.points.slice(beamUpper.N_grip);
+  const limbThicknesses = beamUpper.thicknesses.slice(beamUpper.N_grip);
+  const limbWidths = beamUpper.widths.slice(beamUpper.N_grip);
   const limb = { points: limbPoints, thicknesses: limbThicknesses, widths: limbWidths };
 
   return {
-    limb, beam, dorae, yangyangi, siyahDir, doraeBottom,
+    limb, beam, beamUpper, beamLower,
+    dorae, yangyangi, siyahDir, doraeBottom,         // backward compat (상채 기준)
+    doraeTop, yangyangiTop, siyahDirTop,             // 상채 명시
+    doraeBottom_actual, yangyangiBottom, siyahDirBottom, // 하채 독립 계산
     doraeDist, stringLenAtBrace, limbArcLen,
     T, // 명시적 시위 장력
   };
@@ -483,92 +583,144 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
 // ─── 시위 길이 계산 (감김/직진 모드 포함) ───
 // state: computeBowState 또는 computeBowStateWithTension의 반환값
 // nockX: nock 지점의 x좌표
-// 반환: { computedLen, mode }
-function computeStringLength(params, state, nockX) {
-  const { siyahLength, stringLength } = params;
-  const { dorae, yangyangi } = state;
-  const halfStr = stringLength / 2;
+// nockY: nock 지점의 y좌표 (기본값 0, 상하 비대칭 지원)
+// 반환: { computedLen, modeTop, modeBottom, mode }
+function computeStringLength(params, state, nockX, nockY = 0) {
+  const { siyahLength } = params;
 
-  // nock 지점 (y=0, 대칭)
-  // 직진 모드: dist(yangyangi, nock) × 2
-  const distYang = Math.sqrt((nockX - yangyangi.x) ** 2 + yangyangi.y * yangyangi.y);
-  const directLen = 2 * distYang;
+  // 상하 앵커 포인트 (비대칭 지원, 레거시 호환)
+  const doraeT = state.doraeTop || state.dorae;
+  const yangT = state.yangyangiTop || state.yangyangi;
+  const doraeB = state.doraeBottom_actual || { x: state.dorae.x, y: -state.dorae.y };
+  const yangB = state.yangyangiBottom || { x: state.yangyangi.x, y: -state.yangyangi.y };
 
-  // 감김 판정
-  const nockX_yang = yangyangi.x + Math.sqrt(Math.max(0, halfStr * halfStr - yangyangi.y * yangyangi.y));
-  const dy = dorae.y, yy = yangyangi.y;
-  let isWrapped = false;
-  if (Math.abs(yy) > 1e-6) {
-    const x_line = nockX_yang + (yangyangi.x - nockX_yang) * dy / yy;
-    if (dorae.x > x_line + 1e-6) isWrapped = true;
+  // 상채 반쪽 길이 계산
+  const distYangTop = Math.sqrt((nockX - yangT.x) ** 2 + (nockY - yangT.y) ** 2);
+  const distYangBot = Math.sqrt((nockX - yangB.x) ** 2 + (nockY - yangB.y) ** 2);
+
+  // 상채 감김 판정: yangyangi→nock 직선 위의 dorae 높이에서의 x좌표와 비교
+  let modeTop = 'yangyangi';
+  let topHalf = distYangTop;
+  {
+    const yy = yangT.y;
+    if (Math.abs(yy - nockY) > 1e-6) {
+      const t_dorae = (doraeT.y - nockY) / (yangT.y - nockY);
+      const x_line = nockX + (yangT.x - nockX) * t_dorae;
+      if (doraeT.x > x_line + 1e-6) {
+        modeTop = 'dorae';
+        const distDoraeTop = Math.sqrt((nockX - doraeT.x) ** 2 + (nockY - doraeT.y) ** 2);
+        topHalf = siyahLength + distDoraeTop;
+      }
+    }
   }
 
-  if (isWrapped) {
-    const distDorae = Math.sqrt((nockX - dorae.x) ** 2 + dorae.y * dorae.y);
-    return { computedLen: 2 * (siyahLength + distDorae), mode: 'dorae' };
+  // 하채 감김 판정
+  let modeBottom = 'yangyangi';
+  let bottomHalf = distYangBot;
+  {
+    const yy = yangB.y;
+    if (Math.abs(yy - nockY) > 1e-6) {
+      const t_dorae = (doraeB.y - nockY) / (yangB.y - nockY);
+      const x_line = nockX + (yangB.x - nockX) * t_dorae;
+      if (doraeB.x > x_line + 1e-6) {
+        modeBottom = 'dorae';
+        const distDoraeBot = Math.sqrt((nockX - doraeB.x) ** 2 + (nockY - doraeB.y) ** 2);
+        bottomHalf = siyahLength + distDoraeBot;
+      }
+    }
   }
-  return { computedLen: directLen, mode: 'yangyangi' };
+
+  const computedLen = topHalf + bottomHalf;
+  const mode = (modeTop === 'dorae' || modeBottom === 'dorae') ? 'dorae' : 'yangyangi';
+  return { computedLen, modeTop, modeBottom, mode };
 }
 
 // ─── solveBrace: 이중 루프 평형 솔버 ───
 // 외부 루프: T 이분법 → 시위 길이 제약 만족
 // 내부 루프: computeBowStateWithTension 내부의 형상-힘 자기일관 반복
-// 반환: { state, T_brace, braceHeight, stringMode }
+// 비대칭 상하채 지원: nockY 수직 균형 조건으로 반복 수렴
+// 반환: { state, T_brace, braceHeight, braceNockY, stringMode }
 function solveBrace(params) {
-  const { stringLength } = params;
+  const { stringLength, siyahLength } = params;
   const targetLen = stringLength;
 
   let T_lo = 0, T_hi = 3000; // 장력 범위 (N)
 
-  // nock 위치는 brace에서 시위 중점 (y=0)에 해당
-  // 이분법: T가 작으면 활이 덜 휘어 시위가 길어짐 (computedLen > targetLen)
-  //         T가 크면 활이 많이 휘어 시위가 짧아짐 (computedLen < targetLen)
   let bestState = null;
   let bestMode = 'yangyangi';
   let bestNockX = 0;
+  let bestNockY = 0;
 
   for (let iter = 0; iter < 50; iter++) {
     const T_mid = (T_lo + T_hi) / 2;
 
-    // 초기 forcePoint 추정: nock은 양양고자 x좌표 근처
-    // 먼저 loadFactor 기반으로 대략적 nockX 추정
+    // 초기 forcePoint 추정
     const roughState = computeBowStateWithTension(params, T_mid, { x: 0.15, y: 0 });
 
-    // 이 형상에서 실제 nockX 계산 (시위 길이 = stringLength)
-    const { dorae, yangyangi } = roughState;
-    const halfStr = stringLength / 2;
+    // 비대칭 앵커 포인트 추출
+    const yangT = roughState.yangyangiTop || roughState.yangyangi;
+    const yangB = roughState.yangyangiBottom || { x: roughState.yangyangi.x, y: -roughState.yangyangi.y };
+    const doraeT = roughState.doraeTop || roughState.dorae;
+    const doraeB = roughState.doraeBottom_actual || { x: roughState.dorae.x, y: -roughState.dorae.y };
 
-    // 직진 모드 nockX
-    const under_y = halfStr * halfStr - yangyangi.y * yangyangi.y;
-    if (under_y < 0) {
-      T_lo = T_mid; // 장력 부족
-      continue;
-    }
-    const nockX_yang = yangyangi.x + Math.sqrt(under_y);
-
-    // 감김 판정
-    let nockX = nockX_yang;
+    // nock 위치 반복 수렴 (수직 균형 + 시위 길이 제약)
+    let nockY = 0;
+    let nockX = 0.15;
     let mode = 'yangyangi';
-    const dy = dorae.y, yy = yangyangi.y;
-    if (Math.abs(yy) > 1e-6) {
-      const x_line = nockX_yang + (yangyangi.x - nockX_yang) * dy / yy;
-      if (dorae.x > x_line + 1e-6) {
-        const halfFree = halfStr - params.siyahLength;
-        const under_d = halfFree * halfFree - dy * dy;
-        if (under_d < 0) {
-          T_lo = T_mid;
-          continue;
+
+    for (let nockIter = 0; nockIter < 5; nockIter++) {
+      // 감김 모드 판정 (상채)
+      let topAnchor = yangT;
+      let topFreeAdj = 0;
+      if (Math.abs(yangT.y - nockY) > 1e-6) {
+        const t_dorae = (doraeT.y - nockY) / (yangT.y - nockY);
+        const x_line = nockX + (yangT.x - nockX) * t_dorae;
+        if (doraeT.x > x_line + 1e-6) {
+          topAnchor = doraeT;
+          topFreeAdj = siyahLength;
         }
-        nockX = dorae.x + Math.sqrt(under_d);
-        mode = 'dorae';
+      }
+
+      // 감김 모드 판정 (하채)
+      let botAnchor = yangB;
+      let botFreeAdj = 0;
+      if (Math.abs(yangB.y - nockY) > 1e-6) {
+        const t_dorae = (doraeB.y - nockY) / (yangB.y - nockY);
+        const x_line = nockX + (yangB.x - nockX) * t_dorae;
+        if (doraeB.x > x_line + 1e-6) {
+          botAnchor = doraeB;
+          botFreeAdj = siyahLength;
+        }
+      }
+      mode = (topFreeAdj > 0 || botFreeAdj > 0) ? 'dorae' : 'yangyangi';
+
+      const totalFreeLen = targetLen - topFreeAdj - botFreeAdj;
+
+      // nockX 이분법: dist(topAnchor,nock) + dist(botAnchor,nock) = totalFreeLen
+      let nxLo = Math.max(topAnchor.x, botAnchor.x);
+      let nxHi = nxLo + totalFreeLen;
+      for (let nxIter = 0; nxIter < 40; nxIter++) {
+        const nxMid = (nxLo + nxHi) / 2;
+        const dt = Math.sqrt((nxMid - topAnchor.x) ** 2 + (nockY - topAnchor.y) ** 2);
+        const db = Math.sqrt((nxMid - botAnchor.x) ** 2 + (nockY - botAnchor.y) ** 2);
+        if (dt + db < totalFreeLen) nxLo = nxMid;
+        else nxHi = nxMid;
+      }
+      nockX = (nxLo + nxHi) / 2;
+
+      // 수직 균형으로 nockY 갱신: ny = (topAnchor.y * db + botAnchor.y * dt) / (dt + db)
+      const dt = Math.sqrt((nockX - topAnchor.x) ** 2 + (nockY - topAnchor.y) ** 2);
+      const db = Math.sqrt((nockX - botAnchor.x) ** 2 + (nockY - botAnchor.y) ** 2);
+      if (dt + db > 1e-8) {
+        nockY = (topAnchor.y * db + botAnchor.y * dt) / (dt + db);
       }
     }
 
-    // 형상을 정확한 nockX로 재계산 (forcePoint 보정)
-    const state = computeBowStateWithTension(params, T_mid, { x: nockX, y: 0 });
+    // 정확한 nock 위치로 형상 재계산
+    const state = computeBowStateWithTension(params, T_mid, { x: nockX, y: nockY });
 
-    // 이 형상에서 실제 시위 길이 계산
-    const { computedLen, mode: actualMode } = computeStringLength(params, state, nockX);
+    // 시위 길이 확인
+    const { computedLen, mode: actualMode } = computeStringLength(params, state, nockX, nockY);
 
     if (computedLen > targetLen + 0.0001) {
       T_lo = T_mid; // 시위가 너무 김 → 장력 증가
@@ -578,18 +730,21 @@ function solveBrace(params) {
       bestState = state;
       bestMode = actualMode;
       bestNockX = nockX;
+      bestNockY = nockY;
       break;
     }
 
     bestState = state;
     bestMode = actualMode;
     bestNockX = nockX;
+    bestNockY = nockY;
   }
 
   return {
     state: bestState,
     T_brace: (T_lo + T_hi) / 2,
     braceHeight: bestNockX,
+    braceNockY: bestNockY,
     stringMode: bestMode,
   };
 }
@@ -638,72 +793,172 @@ function solveDraw(params, targetNockX, braceResult) {
   const mode = drawResult.mode || 'yangyangi';
   const state = drawResult.state;
 
-  // T와 F_draw를 기하학에서 정확히 역산
-  const anchor = mode === 'dorae' ? state.dorae : state.yangyangi;
-  const dx = actualNockX - anchor.x;
-  const dy = anchor.y; // 양수 (상채)
-  const dist = Math.sqrt(dx * dx + dy * dy);
+  // nockY 계산 (비대칭 앵커 지원)
+  const nockY = drawResult.nockY || 0;
 
-  // 시위 장력: loadFactor는 모멘트 스케일이므로
-  // T × |dy|/dist = loadFactor (수직 힘 성분 = 모멘트 발생 성분)
-  // → T = finalLf × dist / |dy|
+  // T와 F_draw를 기하학에서 정확히 역산 (비대칭 앵커)
+  const anchorTop = mode === 'dorae'
+    ? (state.doraeTop || state.dorae)
+    : (state.yangyangiTop || state.yangyangi);
+  const anchorBot = mode === 'dorae'
+    ? (state.doraeBottom_actual || state.doraeBottom || { x: state.dorae.x, y: -state.dorae.y })
+    : (state.yangyangiBottom || { x: state.yangyangi.x, y: -state.yangyangi.y });
+
+  const aT = anchorTop;
+  const aB = anchorBot;
+
+  // 상채 앵커 기반 T 역산 (레거시 호환: 상채 기준)
+  // pullOffset 적용: 당김점 y오프셋 (엄지 위치) — 오프셋 0이면 종전과 동일
+  const pullY = nockY + (params.pullOffset || 0);
+  const dxTop = actualNockX - aT.x;
+  const dyTop = pullY - aT.y;
+  const distTop = Math.sqrt(dxTop * dxTop + dyTop * dyTop);
+
+  const dxBot = actualNockX - aB.x;
+  const dyBot = pullY - aB.y;
+  const distBot = Math.sqrt(dxBot * dxBot + dyBot * dyBot);
+
+  // 시위 장력: T = finalLf × dist / |aT.y - pullY| (수직 모멘트 관계)
   let T_draw = 0, F_draw = 0;
-  if (Math.abs(dy) > 1e-6 && dist > 1e-6) {
-    T_draw = finalLf * dist / Math.abs(dy);
-    F_draw = 2 * T_draw * dx / dist; // 수평 성분 × 2 (상하 대칭)
+  const vertTop = Math.abs(aT.y - pullY);
+  if (vertTop > 1e-6 && distTop > 1e-6) {
+    T_draw = finalLf * distTop / vertTop;
+    // F_draw = 상채 수평 성분 + 하채 수평 성분 (수평 당김력)
+    const fTop = distTop > 1e-8 ? T_draw * dxTop / distTop : 0;
+    const fBot = distBot > 1e-8 ? T_draw * dxBot / distBot : 0;
+    F_draw = fTop + fBot;
   }
 
-  return { state, T_draw, nockX: actualNockX, stringMode: mode, F_draw };
+  return { state, T_draw, nockX: actualNockX, nockY, stringMode: mode, F_draw };
 }
 
-// ─── 순방향 매핑: loadFactor → nockX (도르래/기둥 감김 모델) ───
+// ─── 순방향 매핑: loadFactor → nockX, nockY (도르래/기둥 감김 모델) ───
 // 시위는 양양고자(고자 끝)에 고정되며, 도고자(활채/고자 접합부)는
 // 밧줄이 기둥에 걸리듯 접촉점(contact post) 역할을 한다.
 //
-// 감김 판정: 양양고자→nock 직선 경로 위, 도고자 높이에서의 x좌표와
-//           도고자 실제 x좌표를 비교한다.
-//   • 도고자가 직선보다 앞(사대 방향)에 돌출 → 시위가 기둥에 감김
-//   • 도고자가 직선 뒤에 있음 → 시위가 기둥을 지나치지 않고 직진
-//
-// [감김 모드] stringLength/2 = siyahLength + dist(dorae, nock)
-//   → halfFree = stringLength/2 - siyahLength
-//   → nockX = dorae.x + √(halfFree² - dorae.y²)
-//   → F_draw = 2 × loadFactor × (nockX - dorae.x) / |dorae.y|
-//
-// [직진 모드] stringLength/2 = dist(yangyangi, nock)
-//   → halfStr = stringLength/2
-//   → nockX = yangyangi.x + √(halfStr² - yangyangi.y²)
-//   → F_draw = 2 × loadFactor × (nockX - yangyangi.x) / |yangyangi.y|
-// 매 상태마다 시위-도고자 기하학을 확인하여 감김/직진을 동적 판정.
-// 고자 각도는 고정값이지만, 당기는 중 시위와 고자의 상대각도가 변하므로
-// 감김↔이탈 전환이 자연스럽게 발생한다.
+// 비대칭 상하채 지원: nockY 수직 균형 조건으로 반복 수렴
+// 반환: { nockX, nockY, state, mode }
 function computeNockX(params, loadFactor) {
   const { stringLength, siyahLength } = params;
   const state = computeBowState(params, loadFactor);
-  const { dorae, yangyangi } = state;
-  const halfStr = stringLength / 2;
 
-  // ① 직진 모드 nockX (양양고자→nock 직행 가정)
-  const under_y = halfStr * halfStr - yangyangi.y * yangyangi.y;
-  if (under_y < 0) return { nockX: null, state, mode: null };
-  const nockX_yang = yangyangi.x + Math.sqrt(under_y);
+  // 비대칭 앵커 포인트 추출 — 독립 계산값 우선, 없으면 대칭 fallback
+  const yangT = state.yangyangiTop || state.yangyangi;
+  const yangB = state.yangyangiBottom || { x: state.yangyangi.x, y: -state.yangyangi.y };
+  const doraeT = state.doraeTop || state.dorae;
+  const doraeB = state.doraeBottom_actual || state.doraeBottom || { x: state.dorae.x, y: -state.dorae.y };
 
-  // ② 감김 판정: 양양고자→nock 직선이 도고자 높이를 지나는 x좌표
-  //    도고자가 이 직선보다 앞(+x)에 돌출 → 밧줄이 기둥에 감김
-  const dy = dorae.y, yy = yangyangi.y;
-  if (Math.abs(yy) > 1e-6) {
-    const x_line = nockX_yang + (yangyangi.x - nockX_yang) * dy / yy;
-    if (dorae.x > x_line + 1e-6) {
-      // 감김 모드: 시위가 도고자에 걸려서 꺾임
-      const halfFree = halfStr - siyahLength;
-      const under_d = halfFree * halfFree - dy * dy;
-      if (under_d < 0) return { nockX: null, state, mode: 'dorae' };
-      return { nockX: dorae.x + Math.sqrt(under_d), state, mode: 'dorae' };
+  // nock 위치 반복 수렴 (수직 균형 + 시위 길이 제약)
+  let nockY = 0;
+  let nockX = (yangT.x + yangB.x) / 2 + 0.01; // 초기 추정
+  let mode = 'yangyangi';
+
+  for (let nockIter = 0; nockIter < 5; nockIter++) {
+    // 감김 모드 판정 (상채)
+    let topAnchor = yangT;
+    let topFreeAdj = 0;
+    if (Math.abs(yangT.y - nockY) > 1e-6) {
+      const t_dorae = (doraeT.y - nockY) / (yangT.y - nockY);
+      const x_line = nockX + (yangT.x - nockX) * t_dorae;
+      if (doraeT.x > x_line + 1e-6) {
+        topAnchor = doraeT;
+        topFreeAdj = siyahLength;
+      }
+    }
+
+    // 감김 모드 판정 (하채)
+    let botAnchor = yangB;
+    let botFreeAdj = 0;
+    if (Math.abs(yangB.y - nockY) > 1e-6) {
+      const t_dorae = (doraeB.y - nockY) / (yangB.y - nockY);
+      const x_line = nockX + (yangB.x - nockX) * t_dorae;
+      if (doraeB.x > x_line + 1e-6) {
+        botAnchor = doraeB;
+        botFreeAdj = siyahLength;
+      }
+    }
+    mode = (topFreeAdj > 0 || botFreeAdj > 0) ? 'dorae' : 'yangyangi';
+
+    const totalFreeLen = stringLength - topFreeAdj - botFreeAdj;
+
+    // 시위 길이 유효성 체크
+    const minPossible = Math.sqrt((topAnchor.x - botAnchor.x) ** 2 + (topAnchor.y - botAnchor.y) ** 2);
+    if (totalFreeLen < minPossible - 1e-6) return { nockX: null, nockY: null, state, mode };
+
+    // nockX 이분법: dist(topAnchor,nock) + dist(botAnchor,nock) = totalFreeLen
+    let nxLo = Math.max(topAnchor.x, botAnchor.x);
+    let nxHi = nxLo + totalFreeLen;
+    for (let nxIter = 0; nxIter < 40; nxIter++) {
+      const nxMid = (nxLo + nxHi) / 2;
+      const dt = Math.sqrt((nxMid - topAnchor.x) ** 2 + (nockY - topAnchor.y) ** 2);
+      const db = Math.sqrt((nxMid - botAnchor.x) ** 2 + (nockY - botAnchor.y) ** 2);
+      if (dt + db < totalFreeLen) nxLo = nxMid;
+      else nxHi = nxMid;
+    }
+    nockX = (nxLo + nxHi) / 2;
+
+    // 수직 균형으로 nockY 갱신
+    const dt = Math.sqrt((nockX - topAnchor.x) ** 2 + (nockY - topAnchor.y) ** 2);
+    const db = Math.sqrt((nockX - botAnchor.x) ** 2 + (nockY - botAnchor.y) ** 2);
+    if (dt + db > 1e-8) {
+      nockY = (topAnchor.y * db + botAnchor.y * dt) / (dt + db);
     }
   }
 
-  // 직진 모드: 도고자 접촉 없음
-  return { nockX: nockX_yang, state, mode: 'yangyangi' };
+  return { nockX, nockY, state, mode };
+}
+
+// ─── 줌통 반력 계산 ───
+// 시위 장력으로부터 줌통에 작용하는 반력/토크를 계산한다.
+// 줌통 반력 = -(상채 시위력 + 하채 시위력)
+// reactionPointY = 토크 없이 평형이 되는 y좌표 (이상적 반바닥 위치)
+function computeGripReaction(params, bowGeom) {
+  const T = bowGeom.T_current || 0;
+  const pullPoint = bowGeom.pullPoint || { x: bowGeom.nockX, y: bowGeom.nockY || 0 };
+
+  // 상/하채 앵커 (도르래 감김 여부에 따라 다름)
+  const topAnchor = bowGeom.stringMode === 'dorae'
+    ? { x: bowGeom.doraeTop.x, y: bowGeom.doraeTop.y }
+    : { x: bowGeom.yangyangiTop.x, y: bowGeom.yangyangiTop.y };
+  const botAnchor = bowGeom.stringMode === 'dorae'
+    ? { x: bowGeom.doraeBottom.x, y: bowGeom.doraeBottom.y }
+    : { x: bowGeom.yangyangiBottom.x, y: bowGeom.yangyangiBottom.y };
+
+  // 시위 방향 벡터 (pullPoint → 각 앵커)
+  const dxT = topAnchor.x - pullPoint.x;
+  const dyT = topAnchor.y - pullPoint.y;
+  const distT = Math.sqrt(dxT * dxT + dyT * dyT);
+
+  const dxB = botAnchor.x - pullPoint.x;
+  const dyB = botAnchor.y - pullPoint.y;
+  const distB = Math.sqrt(dxB * dxB + dyB * dyB);
+
+  // 시위 힘 = T × 단위벡터 (pullPoint → anchor 방향)
+  let Fx_string = 0, Fy_string = 0;
+  if (distT > 1e-8) {
+    Fx_string += T * dxT / distT;
+    Fy_string += T * dyT / distT;
+  }
+  if (distB > 1e-8) {
+    Fx_string += T * dxB / distB;
+    Fy_string += T * dyB / distB;
+  }
+
+  // 줌통 반력 = -(시위 힘 합) (뉴턴 3법칙)
+  const Fx = -Fx_string;
+  const Fy = -Fy_string;
+
+  // 줌통 중심(0,0) 기준 토크: M = r × F (2D cross product)
+  // 시위 합력이 pullPoint에서 작용하므로:
+  // M_grip = pullPoint.x * Fy_string - pullPoint.y * Fx_string
+  // (줌통 중심에서 pullPoint까지의 위치벡터 × 시위 합력)
+  const M_grip = -(pullPoint.x * Fy_string - pullPoint.y * Fx_string);
+
+  // 이상적 줌 작용점: Fx가 작용하는 y좌표 (이 점에서 밀면 토크 = 0)
+  // reactionPointY = M_grip / Fx (Fx로 나누어 토크를 상쇄하는 y 오프셋)
+  const reactionPointY = Math.abs(Fx) > 1e-6 ? -M_grip / Fx : 0;
+
+  return { Fx, Fy, M_grip, reactionPointY };
 }
 
 // ─── 시위 길이 구속 조건 솔버를 포함한 활 전체 기하학 생성 ───
@@ -742,54 +997,87 @@ function generateBowGeometry(params, drawAmount = 0) {
   const topLimb = finalState.limb;
   const beam = finalState.beam;
 
+  // 비대칭 상하채 지원: beamUpper/beamLower가 있으면 독립 사용, 없으면 대칭 폴백
+  const beamUpper = finalState.beamUpper || finalState.beam;
+  const beamLower = finalState.beamLower || finalState.beam;
+
+  // nockY 추적 (비대칭 시 상하채 힘 불균형으로 nock이 y=0에서 벗어날 수 있음)
+  const braceNockY = braceResultNew.braceNockY || 0;
+  const drawNockY = drawResult ? (drawResult.nockY || 0) : braceNockY;
+  const currentNockY = drawAmount > 0.001 ? drawNockY : braceNockY;
+
+  // 접촉점 오프셋 (사법 모델링)
+  const pullPoint = { x: currentNockX, y: currentNockY + (params.pullOffset || 0) };
+  const nockingPoint = { x: currentNockX, y: currentNockY + (params.nockingOffset || 0) };
+  const restPoint = { x: 0, y: params.restOffsetY || 0 };
+
   // 전체 활 포인트: 하채끝 → (하채 → 줌통 → 상채) → 상채끝
-  // beam.points: [0]=그립중심, [1..N_grip]=줌통, [N_grip+1..N_grip+N_limb]=상채
-  // 하채 = 상채의 y반전 (대칭)
+  // beamUpper.points: [0]=그립중심, [1..N_grip]=줌통, [N_grip+1..N_grip+N_limb]=상채
+  // beamLower: 독립 하채 (비대칭 지원)
   const limbPoints = [];
   const limbRadii = [];
 
-  // 하채 (beam을 y반전하여 역순 배치: 활채끝 → 줌통끝)
-  for (let i = beam.points.length - 1; i > 0; i--) {
-    const p = beam.points[i];
+  // 하채 (beamLower를 y반전하여 역순 배치: 활채끝 → 줌통끝)
+  for (let i = beamLower.points.length - 1; i > 0; i--) {
+    const p = beamLower.points[i];
     limbPoints.push(new THREE.Vector3(p.x, -p.y, 0));
-    limbRadii.push(beam.widths[i] * 0.4);
+    limbRadii.push(beamLower.widths[i] * 0.4);
   }
 
-  // 그립 중심 (beam.points[0])
-  const center = beam.points[0];
+  // 그립 중심 (beamUpper.points[0])
+  const center = beamUpper.points[0];
   limbPoints.push(new THREE.Vector3(center.x, center.y, 0));
-  limbRadii.push(beam.widths[0] * 0.4);
+  limbRadii.push(beamUpper.widths[0] * 0.4);
 
-  // 상채 (beam 순서대로: 줌통 → 활채끝)
-  for (let i = 1; i < beam.points.length; i++) {
-    const p = beam.points[i];
+  // 상채 (beamUpper 순서대로: 줌통 → 활채끝)
+  for (let i = 1; i < beamUpper.points.length; i++) {
+    const p = beamUpper.points[i];
     limbPoints.push(new THREE.Vector3(p.x, p.y, 0));
-    limbRadii.push(beam.widths[i] * 0.4);
+    limbRadii.push(beamUpper.widths[i] * 0.4);
   }
 
-  // 고자 (Three.js Vector3)
-  const doraeTop = new THREE.Vector3(finalState.dorae.x, finalState.dorae.y, 0);
-  const doraeBottom = new THREE.Vector3(finalState.dorae.x, -finalState.dorae.y, 0);
-  const yangyangiTop = new THREE.Vector3(finalState.yangyangi.x, finalState.yangyangi.y, 0);
-  const yangyangiBottom = new THREE.Vector3(finalState.yangyangi.x, -finalState.yangyangi.y, 0);
-  const siyahDirTop = new THREE.Vector3(finalState.siyahDir.x, finalState.siyahDir.y, 0);
-  const siyahDirBottom = new THREE.Vector3(finalState.siyahDir.x, -finalState.siyahDir.y, 0);
+  // 고자 (Three.js Vector3) - 상하채 독립 값 사용, 없으면 대칭 폴백
+  const dT = finalState.doraeTop || finalState.dorae;
+  const dB = finalState.doraeBottom_actual || { x: finalState.dorae.x, y: -finalState.dorae.y };
+  const yT = finalState.yangyangiTop || finalState.yangyangi;
+  const yB = finalState.yangyangiBottom || { x: finalState.yangyangi.x, y: -finalState.yangyangi.y };
+  const sdT = finalState.siyahDirTop || finalState.siyahDir;
+  const sdB = finalState.siyahDirBottom || { x: finalState.siyahDir.x, y: -finalState.siyahDir.y };
+
+  const doraeTop = new THREE.Vector3(dT.x, dT.y, 0);
+  const doraeBottom = new THREE.Vector3(dB.x, dB.y, 0);
+  const yangyangiTop = new THREE.Vector3(yT.x, yT.y, 0);
+  const yangyangiBottom = new THREE.Vector3(yB.x, yB.y, 0);
+  const siyahDirTop = new THREE.Vector3(sdT.x, sdT.y, 0);
+  const siyahDirBottom = new THREE.Vector3(sdB.x, sdB.y, 0);
+
+  // 줌통 반력 계산
+  const gripReaction = computeGripReaction(params, {
+    T_current, nockX: currentNockX, nockY: currentNockY,
+    pullPoint,
+    doraeTop, doraeBottom, yangyangiTop, yangyangiBottom,
+    stringMode,
+  });
 
   return {
     limbPoints,
     limbRadii,
     topLimbData: topLimb,
-    beam,               // 연속 보 데이터 (후속 단계에서 활용)
+    beam,               // 연속 보 데이터 (레거시 호환)
+    beamUpper,          // 상채 보 데이터
+    beamLower,          // 하채 보 데이터
     doraeTop, doraeBottom,
     yangyangiTop, yangyangiBottom,
     siyahDirTop, siyahDirBottom,
     braceHeight,        // 계산된 종속 변수
     nockX: currentNockX,
+    nockY: currentNockY, // 비대칭 시 nock Y 오프셋
     stringMode,         // 'dorae' (감김) 또는 'yangyangi' (직진)
     T_brace,            // brace 시위 장력 (N)
     T_current,          // 현재 시위 장력 (N)
     F_draw,             // 당김력 (N)
     loadFactor: T_current, // 호환용 (레거시)
+    pullPoint, nockingPoint, restPoint, gripReaction,
   };
 }
 
@@ -802,7 +1090,7 @@ function generateBowGeometry(params, drawAmount = 0) {
 function generateStringPath(bowGeom, drawAmount) {
   const { yangyangiTop, yangyangiBottom, doraeTop, doraeBottom, nockX, stringMode } = bowGeom;
 
-  const nockPoint = new THREE.Vector3(nockX, 0, 0);
+  const nockPoint = new THREE.Vector3(nockX, bowGeom.nockY || 0, 0);
   const stringPoints = [];
   const subdivPerSeg = 6;
 
@@ -947,6 +1235,7 @@ function KoreanBow3D() {
   const [showArrow, setShowArrow] = useState(true);
   const [isAnimating, setIsAnimating] = useState(false);
   const [animPhase, setAnimPhase] = useState("idle");
+  const [launchAngleDeg, setLaunchAngleDeg] = useState(null); // 화살 초기발사각 (도)
   const animRef = useRef({ phase: "idle", t: 0 });
   const [showGrid, setShowGrid] = useState(true);
   const [showRestShape, setShowRestShape] = useState(false);
@@ -1267,20 +1556,27 @@ function KoreanBow3D() {
         const arrowGroup = new THREE.Group();
         const arrowLen = 0.82; // 82cm (죽시 기준)
 
-        // 화살대
+        // 화살 방향: restPoint → nockingPoint
+        const restPt = bowGeom.restPoint || { x: 0, y: 0 };
+        const nockPt = bowGeom.nockingPoint || { x: nockPoint.x, y: nockPoint.y };
+        const arrowDx = nockPt.x - restPt.x;
+        const arrowDy = nockPt.y - restPt.y;
+        const arrowAngle = Math.atan2(arrowDy, arrowDx);
+
+        // 화살대 (로컬 x축으로 정렬, nock 위치가 그룹 원점)
         const shaftGeom = new THREE.CylinderGeometry(0.004, 0.004, arrowLen, 8);
         const shaftMat = new THREE.MeshPhysicalMaterial({ color: 0x1a1a1a, roughness: 0.4, metalness: 0.6 });
         const shaft = new THREE.Mesh(shaftGeom, shaftMat);
         shaft.rotation.z = Math.PI / 2;
-        shaft.position.set(nockPoint.x - arrowLen / 2, 0, 0);
+        shaft.position.set(-arrowLen / 2, 0, 0);
         arrowGroup.add(shaft);
 
-        // 촉
+        // 촉 (꼭짓점이 -x 방향 = 과녁 방향을 향하도록)
         const tipGeom = new THREE.ConeGeometry(0.006, 0.04, 6);
         const tipMat = new THREE.MeshPhysicalMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
         const tip = new THREE.Mesh(tipGeom, tipMat);
-        tip.rotation.z = -Math.PI / 2;
-        tip.position.set(nockPoint.x - arrowLen - 0.02, 0, 0);
+        tip.rotation.z = Math.PI / 2;
+        tip.position.set(-arrowLen - 0.02, 0, 0);
         arrowGroup.add(tip);
 
         // 깃
@@ -1292,13 +1588,54 @@ function KoreanBow3D() {
             side: THREE.DoubleSide, roughness: 0.8
           });
           const fletch = new THREE.Mesh(fletchGeom, fletchMat);
-          fletch.position.set(nockPoint.x + 0.05, Math.sin(angle) * 0.008, Math.cos(angle) * 0.008);
+          fletch.position.set(0.05, Math.sin(angle) * 0.008, Math.cos(angle) * 0.008);
           fletch.rotation.x = angle;
           arrowGroup.add(fletch);
         }
 
+        // 그룹을 nock 위치에 배치하고 화살 방향으로 회전
+        arrowGroup.position.set(nockPt.x, nockPt.y, 0);
+        arrowGroup.rotation.z = arrowAngle;
+
         scene.add(arrowGroup);
         arrowMeshRef.current = arrowGroup;
+      }
+    }
+
+    // 접촉점 마커 (항상 표시)
+    if (bowGeom && bowGeom.restPoint) {
+      const restMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.006, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0x33ff33 })
+      );
+      restMarker.position.set(bowGeom.restPoint.x, bowGeom.restPoint.y, 0);
+      scene.add(restMarker);
+    }
+    if (bowGeom && bowGeom.gripReaction) {
+      const gripMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.006, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0x3388ff })
+      );
+      gripMarker.position.set(0, bowGeom.gripReaction.reactionPointY, 0);
+      scene.add(gripMarker);
+    }
+    // 당김 중일 때만 nockingPoint / pullPoint 마커 표시
+    if (bowGeom && draw > 0.01) {
+      if (bowGeom.nockingPoint) {
+        const nockMarker = new THREE.Mesh(
+          new THREE.SphereGeometry(0.006, 8, 8),
+          new THREE.MeshBasicMaterial({ color: 0xff3333 })
+        );
+        nockMarker.position.set(bowGeom.nockingPoint.x, bowGeom.nockingPoint.y, 0);
+        scene.add(nockMarker);
+      }
+      if (bowGeom.pullPoint) {
+        const pullMarker = new THREE.Mesh(
+          new THREE.SphereGeometry(0.006, 8, 8),
+          new THREE.MeshBasicMaterial({ color: 0xffcc00 })
+        );
+        pullMarker.position.set(bowGeom.pullPoint.x, bowGeom.pullPoint.y, 0);
+        scene.add(pullMarker);
       }
     }
 
@@ -1366,6 +1703,14 @@ function KoreanBow3D() {
             anim.arrowX = bowGeomDataRef.current ? bowGeomDataRef.current.nockX : 0.8;
             anim.needArrowCreate = true;
             isArrowFlyingRef.current = true;
+            // 화살 초기발사각 계산: restPoint → nockingPoint 방향 (만작 시점의 기하학)
+            const bg = bowGeomDataRef.current;
+            if (bg) {
+              const rp = bg.restPoint || { x: 0, y: 0 };
+              const np = bg.nockingPoint || { x: bg.nockX, y: bg.nockY || 0 };
+              const angleDeg = Math.atan2(np.y - rp.y, np.x - rp.x) * (180 / Math.PI);
+              setLaunchAngleDeg(angleDeg);
+            }
             setAnimPhase("bowVibration");
           }
         } else if (anim.phase === "bowVibration") {
@@ -1398,7 +1743,7 @@ function KoreanBow3D() {
             const tipGeom = new THREE.ConeGeometry(0.006, 0.04, 6);
             const tipMat = new THREE.MeshPhysicalMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
             const tip = new THREE.Mesh(tipGeom, tipMat);
-            tip.rotation.z = -Math.PI / 2;
+            tip.rotation.z = Math.PI / 2;
             tip.position.set(-arrowLen / 2 - 0.02, 0, 0);
             ag.add(tip);
 
@@ -1496,6 +1841,7 @@ function KoreanBow3D() {
     setAnimPhase("drawing");
     setIsAnimating(true);
     setDrawAmount(0);
+    setLaunchAngleDeg(null); // 이전 발사각 초기화
   };
 
   const updateParam = (key, value) => {
@@ -1545,8 +1891,9 @@ function KoreanBow3D() {
             <div>Nock 위치: <b style={{ color: "#ffcc44" }}>{currentDrawCm.toFixed(1)} cm</b></div>
             <div>Brace height: <b style={{ color: "#88ddff" }}>{(computedBraceHeight * 100).toFixed(1)} cm</b> (계산값)</div>
             <div>시위 장력: <b style={{ color: "#ff7744" }}>{(bowGeomData.T_current || 0).toFixed(0)} N</b></div>
-            {drawAmount > 0.01 && <div>당김력: <b style={{ color: "#ff9966" }}>{(bowGeomData.F_draw || 0).toFixed(0)} N ({((bowGeomData.F_draw || 0) / 9.81).toFixed(1)} kgf)</b></div>}
+            {drawAmount > 0.01 && <div>당김력: <b style={{ color: "#ff9966" }}>{(bowGeomData.F_draw || 0).toFixed(0)} N ({((bowGeomData.F_draw || 0) / 9.81).toFixed(1)} kgf / {((bowGeomData.F_draw || 0) / 4.44822).toFixed(1)} lbs)</b></div>}
             <div>당김 비율: <b style={{ color: "#88ff88" }}>{(drawAmount * 100).toFixed(0)}%</b></div>
+            {launchAngleDeg !== null && <div>초기발사각: <b style={{ color: "#ffaaff" }}>{launchAngleDeg.toFixed(2)}°</b></div>}
           </div>
 
           {/* 구조 범례 */}
@@ -1693,14 +2040,38 @@ function KoreanBow3D() {
               { key: "elasticModulus", label: "탄성계수", unit: "GPa", min: 20, max: 80, step: 1, toVal: v => v / 1e9, fromVal: v => v * 1e9 },
               { key: "limbWidth", label: "활채 폭", unit: "mm", min: 20, max: 40, step: 1, toVal: v => v * 1000, fromVal: v => v / 1000 },
               { key: "limbThickness", label: "활채 두께", unit: "mm", min: 8, max: 18, step: 0.5, toVal: v => v * 1000, fromVal: v => v / 1000 },
+              { key: "limbAsymmetryRatio", label: "하채 강성비", unit: "×", min: 0.8, max: 1.5, step: 0.05, toVal: v => v, fromVal: v => v },
             ].map(({ key, label, unit, min, max, step, toVal, fromVal }) => (
               <div key={key} style={{ marginBottom: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
                   <span>{label}</span>
-                  <span style={{ color: "#ffcc44" }}>{toVal(params[key]).toFixed(key === "limbThickness" ? 1 : 0)} {unit}</span>
+                  <span style={{ color: "#ffcc44" }}>{toVal(params[key]).toFixed(key === "limbAsymmetryRatio" ? 2 : key === "limbThickness" ? 1 : 0)} {unit}</span>
                 </div>
                 <input type="range" min={min} max={max} step={step}
                   value={toVal(params[key])}
+                  onChange={e => updateParam(key, fromVal(parseFloat(e.target.value)))}
+                  style={{ width: "100%", accentColor: "#6666cc" }} />
+              </div>
+            ))}
+          </div>
+
+          {/* 접촉점 설정 */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: "#aaaacc", borderBottom: "1px solid #333", paddingBottom: 4 }}>
+              접촉점 설정
+            </div>
+            {[
+              { key: "nockingOffset", label: "오니 오프셋", unit: "mm", min: -50, max: 150, step: 1, toVal: v => v * 1000, fromVal: v => v / 1000 },
+              { key: "pullOffset", label: "당김점 오프셋", unit: "mm", min: -30, max: 0, step: 0.5, toVal: v => v * 1000, fromVal: v => v / 1000 },
+              { key: "restOffsetY", label: "화살걸이 오프셋", unit: "mm", min: -50, max: 150, step: 1, toVal: v => v * 1000, fromVal: v => v / 1000 },
+            ].map(({ key, label, unit, min, max, step, toVal, fromVal }) => (
+              <div key={key} style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
+                  <span>{label}</span>
+                  <span style={{ color: "#ffcc44" }}>{toVal(params[key] || 0).toFixed(1)} {unit}</span>
+                </div>
+                <input type="range" min={min} max={max} step={step}
+                  value={toVal(params[key] || 0)}
                   onChange={e => updateParam(key, fromVal(parseFloat(e.target.value)))}
                   style={{ width: "100%", accentColor: "#6666cc" }} />
               </div>
@@ -1715,11 +2086,27 @@ function KoreanBow3D() {
             <div style={{ fontWeight: 700, marginBottom: 8, color: "#aaaacc" }}>물리량 요약</div>
             <div style={{ lineHeight: 2 }}>
               <div>줌통부 EI: <b>{((params.elasticModulus * params.limbWidth * Math.pow(params.limbThickness, 3)) / 12).toFixed(2)} N·m²</b></div>
+              {params.limbAsymmetryRatio !== 1.0 && (
+                <div>하채 강성비: <b>{params.limbAsymmetryRatio.toFixed(2)}×</b></div>
+              )}
               <div>Brace height: <b>{(computedBraceHeight * 100).toFixed(1)} cm</b></div>
               <div>현재 Nock 위치: <b>{currentDrawCm.toFixed(1)} cm</b></div>
               <div>하중 인자: <b>{computedLoadFactor.toFixed(2)}</b></div>
               <div>활채 호 길이: <b>{((params.bowLength / 2 - params.gripLength / 2 - params.siyahLength) * 100).toFixed(1)} cm</b></div>
             </div>
+            {bowGeomData && bowGeomData.gripReaction && (
+              <>
+                <div style={{ borderTop: "1px solid #333", marginTop: 6, paddingTop: 6 }}>
+                  <div style={{ color: "#aaaacc", fontWeight: 600, marginBottom: 4 }}>줌통 반력</div>
+                </div>
+                <div style={{ lineHeight: 2 }}>
+                  <div>미는 힘 Fx: <b>{bowGeomData.gripReaction.Fx.toFixed(1)} N</b></div>
+                  <div>수직 반력 Fy: <b>{bowGeomData.gripReaction.Fy.toFixed(1)} N</b></div>
+                  <div>토크: <b>{(bowGeomData.gripReaction.M_grip * 1000).toFixed(1)} mN·m</b></div>
+                  <div>이상 작용점: <b>{(bowGeomData.gripReaction.reactionPointY * 1000).toFixed(1)} mm</b></div>
+                </div>
+              </>
+            )}
           </div>
 
           <div style={{ marginTop: 16, fontSize: 11, color: "#666", lineHeight: 1.8 }}>

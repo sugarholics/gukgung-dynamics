@@ -13,7 +13,7 @@
 ├── index.html           # 빌드 결과 (브라우저용)
 ├── build_html.js        # 빌드 스크립트
 ├── CLAUDE.md            # 이 파일
-└── .claude/skills/      # 에이전트 스킬 (physics-engine, threejs-viz, sim-build-test)
+└── .claude/skills/      # 에이전트 스킬 (physics-engine, threejs-viz, sim-build-test, asymmetric-limb)
 ```
 
 ### 빌드 프로세스
@@ -55,11 +55,11 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 
 | 함수명 | 역할 | 입력 → 출력 |
 |-------|------|-----------|
-| `getBeamProfile` | 연속 보 EI/두께/폭/자연곡률 프로파일 | (sHalf, params) → {EI, h, w, kappa0} |
-| `generateFullBeam` | 그립중심→활채끝 연속 곡률 적분 (줌통 10 + 활채 40 분할) | (params, kappaLoadFn) → {points, thicknesses, widths, ...} |
-| `computeRestShape` | 무현(unstrung) 기준 형상 | (params) → {beam, restPoints, siyahTop/Bottom} |
+| `getBeamProfile` | 연속 보 EI/두께/폭/자연곡률 프로파일 | (sHalf, params, limbSide?) → {EI, h, w, kappa0} |
+| `generateFullBeam` | 그립중심→활채끝 연속 곡률 적분 (줌통 10 + 활채 40 분할) | (params, kappaLoadFn, limbSide?) → {points, thicknesses, widths, ...} |
+| `computeRestShape` | 무현(unstrung) 기준 형상 | (params) → {beamUpper, beamLower, restPoints, siyahTop/Bottom} |
 | `computeBowState` | loadFactor 기반 활 형상 (레거시) | (params, loadFactor) → {limb, beam, dorae, yangyangi, ...} |
-| `computeBowStateWithTension` | T 기반 형상-힘 자기일관 반복 | (params, T, forcePoint, options?) → {limb, beam, dorae, ...} |
+| `computeBowStateWithTension` | T 기반 형상-힘 자기일관 반복 (dual beam 지원) | (params, T, forcePoint, options?) → {limb, beamUpper, beamLower, doraeTop, doraeBottom, yangyangiTop, yangyangiBottom, ...} |
 | `computeStringLength` | 시위 길이 계산 (감김/직진 모드) | (params, state, nockX) → {computedLen, mode} |
 | `solveBrace` | T 이분법으로 brace 평형 | (params) → {state, T_brace, braceHeight, stringMode} |
 | `solveDraw` | 하이브리드 draw 솔버 (loadFactor + T/F 역산) | (params, targetNockX, braceResult) → {state, T_draw, F_draw, ...} |
@@ -77,6 +77,7 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 - 줌통+활채를 하나의 연속 보로 모델링 → C¹ 연속성 보장 (꺾임 없음)
 - EI(s) 프로파일: 줌통 = limbRootEI × gripStiffnessRatio, 경계에서 코사인 보간 (±1.5cm)
 - 무현 형상: 자연곡률 κ₀(s)만으로 적분 (반곡 C자 형태)
+- **비대칭 모델**: `limbAsymmetryRatio`로 하채 EI를 독립 스케일링. 상하채 beamUpper/beamLower 별도 생성. 줌통 구간은 비대칭 미적용 (항상 대칭). 하채 적분 시 forcePointMirrored = {x, -y} 사용 후 y 좌표 재반전.
 
 ### 솔버 구조
 - **solveBrace**: 외부=T 이분법(50회), 내부=형상-힘 자기일관(3회, relaxation 0.5)
@@ -103,11 +104,16 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 | siyahAngle | 55° | 고자 꺾임 각도 | 시위 감김에 영향 |
 | gripAngle | 10° | 줌통 V자 각도 | 리커브 프로파일 |
 | gripStiffnessRatio | 15 | 줌통/활채 강성비 | 줌통 탄성 거동 |
+| limbAsymmetryRatio | 1.0 | 하채 EI / 상채 EI 비율 (0.8~1.5) | 비대칭 굽힘, nockY 편향 |
 
 **검증된 물리량** (기본 파라미터):
 - Brace height: 15.0 cm ✓
 - T_brace: 519 N
 - 50% draw T: 603 N, F_draw: 547 N (55.8 kgf)
+
+**비대칭 테스트값** (limbAsymmetryRatio 변화):
+- ratio=1.0 (대칭): Brace 15.0 cm, T_brace 519 N (기본값과 동일)
+- ratio=1.3 (하채 강성): Brace 15.3 cm, T_brace 577 N
 
 ## 알려진 제한사항
 1. draw 솔버에서 캔틸레버 모멘트 근사 유지 (기하학적 비선형 내부 반복은 brace에서만 적용)
