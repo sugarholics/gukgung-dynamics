@@ -84,7 +84,8 @@ const DEFAULT_PARAMS = {
   arrowMass: 0.025,           // 총 질량 (kg) — 슬라이더: 0.020~0.035
   arrowTipMass: 0.008,        // 촉 질량 (kg) — 금속성 촉
   arrowSpine: 700,            // 정적 스파인 번호 — AMO 표준으로 EI 결정 (주 파라미터)
-  arrowOuterDiam: 0.0052,     // 카본 튜브 외경 (m) — 5.2mm, ��각용
+  arrowOuterDiam: 0.0052,     // 카본 튜브 외경 (m) — 5.2mm, 시각용
+  nockClipForce: 3.0,         // nock 클립 보유력 (N) — 횡방향, 1~5N
 };
 
 // ─── 연속 보 EI(s) 프로파일 및 자연곡률 κ₀(s) ───
@@ -1459,20 +1460,37 @@ function preSampleBowAnchors(params, n = 21) {
     const anchorBot = g.stringMode === 'dorae'
       ? { x: g.doraeBottom.x, y: g.doraeBottom.y }
       : { x: g.yangyangiBottom.x, y: g.yangyangiBottom.y };
+    const nockPt = g.nockingPoint || { x: g.nockX, y: g.nockY || 0 };
+
+    // 시위 상현/하현 길이 (nock 고정 위치에서)
+    const dxT = anchorTop.x - nockPt.x, dyT = anchorTop.y - nockPt.y;
+    const dxB = anchorBot.x - nockPt.x, dyB = anchorBot.y - nockPt.y;
+    const L_upper = Math.sqrt(dxT * dxT + dyT * dyT);
+    const L_lower = Math.sqrt(dxB * dxB + dyB * dyB);
+
     samples.push({
       drawAmount: d,
       anchorTop, anchorBot,
       T_current: g.T_current || 0,
+      F_draw: g.F_draw || 0,
       nockX: g.nockX,
       nockY: g.nockY || 0,
-      nockingPoint: g.nockingPoint ? { ...g.nockingPoint } : { x: g.nockX, y: 0 },
+      nockingPoint: { ...nockPt },
       restPoint: g.restPoint ? { ...g.restPoint } : { x: 0, y: params.restOffsetY || 0 },
+      L_upper, L_lower,
+      // q = nock 변위 (brace 기준, 나중에 채움)
+      q: 0,
     });
+  }
+  // q = nockX - nockX_brace
+  const nockX_brace = samples[0].nockX;
+  for (let i = 0; i < n; i++) {
+    samples[i].q = samples[i].nockX - nockX_brace;
   }
   return samples;
 }
 
-// 사전 샘플에서 선형 보간
+// 사전 샘플에서 선형 보간 (drawAmount 기반)
 function interpolateBowState(samples, drawAmount) {
   const d = Math.max(0, Math.min(1, drawAmount));
   const n = samples.length;
@@ -1486,6 +1504,7 @@ function interpolateBowState(samples, drawAmount) {
     anchorTop: { x: lerp(s0.anchorTop.x, s1.anchorTop.x), y: lerp(s0.anchorTop.y, s1.anchorTop.y) },
     anchorBot: { x: lerp(s0.anchorBot.x, s1.anchorBot.x), y: lerp(s0.anchorBot.y, s1.anchorBot.y) },
     T_current: lerp(s0.T_current, s1.T_current),
+    F_draw: lerp(s0.F_draw, s1.F_draw),
     nockX: lerp(s0.nockX, s1.nockX),
     nockY: lerp(s0.nockY, s1.nockY),
     nockingPoint: {
@@ -1493,7 +1512,76 @@ function interpolateBowState(samples, drawAmount) {
       y: lerp(s0.nockingPoint.y, s1.nockingPoint.y),
     },
     restPoint: s0.restPoint,
+    q: lerp(s0.q, s1.q),
   };
+}
+
+// q 기반 보간: 활채 유효변위 q → 앵커 위치, 복원력
+function interpolateBowByQ(samples, q) {
+  // q가 샘플 범위 내에서 해당하는 두 샘플 찾기
+  const n = samples.length;
+  let i0 = 0;
+  for (let i = 1; i < n; i++) {
+    if (samples[i].q >= q) break;
+    i0 = i;
+  }
+  const i1 = Math.min(i0 + 1, n - 1);
+  if (i0 === i1) return samples[i0];
+  const frac = (q - samples[i0].q) / (samples[i1].q - samples[i0].q || 1e-10);
+  const s0 = samples[i0], s1 = samples[i1];
+  const lerp = (a, b) => a + (b - a) * frac;
+  return {
+    anchorTop: { x: lerp(s0.anchorTop.x, s1.anchorTop.x), y: lerp(s0.anchorTop.y, s1.anchorTop.y) },
+    anchorBot: { x: lerp(s0.anchorBot.x, s1.anchorBot.x), y: lerp(s0.anchorBot.y, s1.anchorBot.y) },
+    F_draw: lerp(s0.F_draw, s1.F_draw),
+    T_current: lerp(s0.T_current, s1.T_current),
+    nockX: lerp(s0.nockX, s1.nockX),
+    drawAmount: lerp(s0.drawAmount, s1.drawAmount),
+    restPoint: s0.restPoint,
+    q,
+  };
+}
+
+// 원-원 교점: nock 위치를 시위 상현/하현 길이로 결정
+// nock은 시위의 고정 위치에 끼워져 있으므로 L_upper, L_lower는 상수
+// anchorTop, anchorBot + L_upper, L_lower → nock 위치 (궁사 쪽 교점)
+function computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower) {
+  const dx = anchorTop.x - anchorBot.x;
+  const dy = anchorTop.y - anchorBot.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+
+  // 시위가 도달 불가하면 최대 연장 위치 반환
+  if (d > L_upper + L_lower || d < 1e-6) {
+    return {
+      x: (anchorTop.x + anchorBot.x) / 2,
+      y: (anchorTop.y + anchorBot.y) / 2,
+      valid: false,
+    };
+  }
+
+  // 표준 원-원 교점 공식
+  const a = (L_upper * L_upper - L_lower * L_lower + d * d) / (2 * d);
+  const h2 = L_upper * L_upper - a * a;
+  const h = h2 > 0 ? Math.sqrt(h2) : 0;
+
+  // 앵커 간 중간점 + 법선 방향
+  const mx = anchorBot.x + (a / d) * dx;
+  const my = anchorBot.y + (a / d) * dy;
+
+  // 법선 (두 교점 중 궁사 쪽 = +x 방향을 선택)
+  const nx = -dy / d;
+  const ny = dx / d;
+
+  // 두 교점
+  const p1x = mx + h * nx, p1y = my + h * ny;
+  const p2x = mx - h * nx, p2y = my - h * ny;
+
+  // 궁사 쪽 (+x) 교점 선택
+  if (p1x >= p2x) {
+    return { x: p1x, y: p1y, valid: true };
+  } else {
+    return { x: p2x, y: p2y, valid: true };
+  }
 }
 
 // Lumped-mass 화살 초기화 (만작 상태)
@@ -1699,60 +1787,33 @@ function computeRestContactForce(state, restPos, k_rest = 5e3) {
   return { nodeIndex: ci, Fy, inContact };
 }
 
-// Störmer-Verlet 1스텝 (구속 보정 후 속도를 위치 차분으로 갱신)
+// Störmer-Verlet 1스텝 (자유 비행 전용 — on-string은 simulateRelease가 직접 처리)
 function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
   const { N, x, y, vx, vy, m } = state;
   const g_accel = 9.81;
 
-  // 이전 위치 저장 (속도 역산용)
   const x_old = Float64Array.from(x);
   const y_old = Float64Array.from(y);
 
-  // 1) 힘 계산
+  // 힘 계산: bending + gravity + rest (시위력 없음 — 이미 분리됨)
   const bend = computeBendingForces(state);
-  const strF = computeStringForceOnNock(state, bowState, drawAmount);
   const restF = computeRestContactForce(state, restPos);
 
-  // 2) 가속도
   const ax = new Float64Array(N);
   const ay = new Float64Array(N);
-  // 전체 질량
-  let M_total = 0;
-  for (let i = 0; i < N; i++) M_total += m[i];
-
   for (let i = 0; i < N; i++) {
     ax[i] = bend.fx[i] / m[i];
     ay[i] = (bend.fy[i] - m[i] * g_accel) / m[i];
-  }
-  // 시위력: nock이 시위 위치에 구속되므로 축방향(Fx)은 구속이 처리
-  // 횡방향(Fy)만 nock 노드에 적용 (archer's paradox 원인)
-  if (state.onString && strF.Fy !== 0) {
-    ay[0] += strF.Fy / m[0];
   }
   if (restF.Fy !== 0) {
     ay[restF.nodeIndex] += restF.Fy / m[restF.nodeIndex];
   }
 
-  // 3) 위치 업데이트 (Verlet)
   for (let i = 0; i < N; i++) {
     x[i] += vx[i] * dt + 0.5 * ax[i] * dt * dt;
     y[i] += vy[i] * dt + 0.5 * ay[i] * dt * dt;
   }
 
-  // onString: nock은 시위 위치에 구속 (시위가 nock을 구동)
-  // nock이 시위보다 앞서갈 수 없음 (시위가 밀어주는 구조)
-  // nock이 시위보다 뒤처지면 → 분리 (시위가 돌아가는데 화살이 안 따라감)
-  if (state.onString) {
-    if (x[0] > bowState.nockX + 0.001) {
-      // nock이 시위보다 뒤에 있음 → 시위가 이미 앞으로 갔는데 화살이 못 따라감 → 분리
-      state.onString = false;
-    } else {
-      // nock을 시위 위치에 고정 (시위가 구동)
-      x[0] = bowState.nockX;
-    }
-  }
-
-  // 4) 거리 구속 (SHAKE)
   enforceDistanceConstraints(state, 30);
 
   // 5) 속도 = (보정된 위치 - 이전 위치) / dt (구속력 임펄스 자동 반영)
@@ -1878,72 +1939,195 @@ function computeModalAmplitudes(state, arrowProps, modes) {
 }
 
 // 마스터 시뮬레이션 함수: 전체 발시 과정 사전 계산
+// 결합 동역학 시뮬레이션: 활채 ODE + 시위 구속 + 화살 lumped-mass
 function simulateRelease(params) {
   const dt = 0.00001;        // 10μs = 0.01ms
   const T_MAX = 0.030;       // 30ms
   const storeInterval = 10;  // 매 10스텝 (0.1ms) 마다 저장
 
-  // 1) 사전 샘플링
-  const samples = preSampleBowAnchors(params, 21);
+  // 1) 사전 샘플링 (q, F_draw, 앵커, 시위 길이 테이블)
+  const samples = preSampleBowAnchors(params, 31); // 더 촘촘하게
   const arrowProps = computeArrowProperties(params);
 
-  // 2) 만작 상태에서 초기화
-  const fullDrawState = samples[samples.length - 1]; // drawAmount=1
-  const nockPos = fullDrawState.nockingPoint;
-  const restPos = fullDrawState.restPoint;
-  const state = initLumpedMassArrow(arrowProps, nockPos, restPos);
+  // 2) 활채 유효질량 (Klopsteg 가상질량)
+  const m_limb_each = 0.050; // kg (FRP 활채)
+  const m_siyah_each = 0.010; // kg (고자)
+  const m_string = 0.005; // kg (시위)
+  const m_eff_limb = 2 * (0.20 * m_limb_each + m_siyah_each) + m_string / 3;
+  const zeta_limb = params.dampingRatio || 0.02;
 
-  // 3) 시뮬레이션 루프
+  // 3) 만작 상태 초기화
+  const fullDraw = samples[samples.length - 1];
+  const brace = samples[0];
+  const nockPos = fullDraw.nockingPoint;
+  const restPos = fullDraw.restPoint;
+  const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos);
+
+  // 시위 상현/하현 고정 길이 (만작 시점의 값 사용)
+  const L_upper = fullDraw.L_upper;
+  const L_lower = fullDraw.L_lower;
+
+  // 활채 상태: q = nockX - nockX_brace, q_dot = 0
+  let q = fullDraw.q;      // 만작 변위
+  let q_dot = 0;            // 초기 정지
+
+  // 활채 강성 (F_draw-q 테이블에서 국소 구배)
+  const vibParams = computeVibrationParams(params);
+
+  // 모드형상 사전 계산
+  const modes = computeFreeFreeModeshapes(arrowProps, arrowState.N);
+  const nockClipF = params.nockClipForce || 3.0;
+
+  // 4) 시뮬레이션 루프
   const phase1Frames = [];
   let separated = false;
   let phase2Data = null;
-  const vibParams = computeVibrationParams(params);
-
-  // 시위 풀림 시간 추정: F_avg로부터
-  const F_avg = fullDrawState.T_current * 0.5; // 대략 평균 시위력
-  const v_est = Math.sqrt(Math.max(1, 2 * 0.82 * vibParams.E_stored / arrowProps.m_total));
-  const releaseTime = Math.max(0.005, Math.min(0.025,
-    arrowProps.m_total * v_est / Math.max(F_avg, 10)));
-
-  // 모드형상 사전 계산
-  const modes = computeFreeFreeModeshapes(arrowProps, state.N);
-
   const totalSteps = Math.ceil(T_MAX / dt);
+
   for (let step = 0; step <= totalSteps; step++) {
     const t = step * dt;
-    const drawAmount = Math.max(0, 1 - t / releaseTime);
-    const bowState = interpolateBowState(samples, drawAmount);
 
-    // 적분
-    stepLumpedMass(state, bowState, restPos, dt, drawAmount);
+    // ── A. 활채 상태에서 앵커 위치 보간 ──
+    const limbState = interpolateBowByQ(samples, q);
+    const anchorTop = limbState.anchorTop;
+    const anchorBot = limbState.anchorBot;
 
-    // 시위 분리 감지
-    // on-string 최대 시간 제한: 10ms 이후 강제 분리 (SHAKE 누적 오차 방지)
-    if (state.onString && t > 0.010) {
-      state.onString = false;
+    if (arrowState.onString) {
+      // ── B. 시위 구속: 원-원 교점으로 nock 필요 위치 계산 ──
+      const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
+
+      // ── C. 시위 장력 T 계산 (nock을 필요 위치로 이동시키는 구속력) ──
+      // nock의 현재 위치와 필요 위치의 차이 → 구속력
+      const nock_x = arrowState.x[0], nock_y = arrowState.y[0];
+      const dx_corr = nockTarget.x - nock_x;
+      const dy_corr = nockTarget.y - nock_y;
+
+      // 시위 방향 벡터 (nock → 각 앵커)
+      const dxT = anchorTop.x - nockTarget.x, dyT = anchorTop.y - nockTarget.y;
+      const dxB = anchorBot.x - nockTarget.x, dyB = anchorBot.y - nockTarget.y;
+      const distT = Math.sqrt(dxT * dxT + dyT * dyT) || 1e-6;
+      const distB = Math.sqrt(dxB * dxB + dyB * dyB) || 1e-6;
+      const eT = { x: dxT / distT, y: dyT / distT };
+      const eB = { x: dxB / distB, y: dyB / distB };
+
+      // 시위 합력 방향
+      const e_sum_x = eT.x + eB.x;
+      const e_sum_y = eT.y + eB.y;
+
+      // T = 정적 평형 장력 (q에서의 시위 장력, 사전 샘플에서 보간)
+      // 동적 보정은 무시 (정적 T가 1차 근사로 충분)
+      const T_string = limbState.T_current;
+
+      // ── D. 화살에 시위력 적용 (Fx + Fy 모두) ──
+      const Fx = T_string * e_sum_x;
+      const Fy = T_string * e_sum_y;
+
+      // nock을 시위 위치로 직접 이동 (SHAKE 대신 직접 투영)
+      arrowState.x[0] = nockTarget.x;
+      arrowState.y[0] = nockTarget.y;
+
+      // ── E. 활채 ODE: 복원력 - 시위 반력 ──
+      // 시위가 활채를 당기는 힘 = T × cos(시위-q방향 각도) ≈ T × e_sum_x (q ≈ x 방향)
+      const F_restore = limbState.F_draw; // 정적 복원력 (q 위치에서)
+      // 활채 ODE: 복원력은 활채를 brace로 끌고 가고, 시위 장력은 화살이 연결된 동안 저항
+      // F_restore > 0 (만작에서 brace 방향), T가 화살을 가속하면서 활채에 반력
+      // 화살이 충분히 가속되면 T가 줄어들어 활채가 빠르게 복원
+      // 순가속도 = -(F_restore - T × proj) / m_eff (brace 방향 = q 감소)
+      const cosProj = Math.abs(e_sum_x); // 시위력의 q방향 투영
+      const F_net_limb = -F_restore; // 복원력만 (T 반력은 nock 구속으로 암묵 처리)
+      const k_local = Math.abs(F_restore) / Math.max(Math.abs(q), 0.01);
+      const q_accel = F_net_limb / m_eff_limb - 2 * zeta_limb * Math.sqrt(k_local / m_eff_limb) * q_dot;
+
+      // 활채 Verlet
+      q += q_dot * dt + 0.5 * q_accel * dt * dt;
+      q_dot += q_accel * dt;
+      // q를 0 이하로 제한 (brace를 넘어가지 않도록 — 오버슈트는 나중에 처리)
+      // 실제로는 오버슈트 허용 (활채가 brace를 지나감)
+      if (q < -0.15) q = -0.15; // 물리적 한계
+
+      // ── F. 화살 나머지 노드 적분 (bending + gravity + rest) ──
+      // 시위력은 이미 nock 위치 직접 투영으로 적용됨
+      // 나머지 노드만 Verlet
+      const { N, x, y, vx, vy, m } = arrowState;
+      const x_old = Float64Array.from(x);
+      const y_old = Float64Array.from(y);
+
+      const bend = computeBendingForces(arrowState);
+      const restF = computeRestContactForce(arrowState, restPos);
+      for (let i = 1; i < N; i++) { // i=0(nock)은 이미 투영됨
+        const ax_i = bend.fx[i] / m[i];
+        const ay_i = (bend.fy[i] - m[i] * 9.81) / m[i] + (i === restF.nodeIndex && restF.Fy ? restF.Fy / m[i] : 0);
+        x[i] += vx[i] * dt + 0.5 * ax_i * dt * dt;
+        y[i] += vy[i] * dt + 0.5 * ay_i * dt * dt;
+      }
+      enforceDistanceConstraints(arrowState, 30);
+      for (let i = 0; i < N; i++) {
+        vx[i] = (x[i] - x_old[i]) / dt;
+        vy[i] = (y[i] - y_old[i]) / dt;
+      }
+      // 고주파 감쇠
+      const alpha = 0.05;
+      for (let i = 1; i < N - 1; i++) {
+        vx[i] += alpha * ((vx[i-1]+vx[i+1])/2 - vx[i]);
+        vy[i] += alpha * ((vy[i-1]+vy[i+1])/2 - vy[i]);
+      }
+
+      // ── G. 분리 판정 ──
+      // Nock 클립은 시위 방향으로는 자유 (축력 전달 가능)
+      // 시위에 수직인 횡력만이 클립을 벌려 분리시킴
+      // 시위 방향 = (e_upper + e_lower)의 평균
+      const string_dir_x = (eT.x + eB.x), string_dir_y = (eT.y + eB.y);
+      const sdLen = Math.sqrt(string_dir_x*string_dir_x + string_dir_y*string_dir_y) || 1e-6;
+      const sd_nx = -string_dir_y / sdLen, sd_ny = string_dir_x / sdLen; // 시위에 수직
+      // 시위력의 시위-수직 성분 = 실질적 횡력
+      const F_perp = Math.abs(Fx * sd_nx + Fy * sd_ny);
+      if (F_perp > nockClipF && t > 0.003) {
+        arrowState.onString = false;
+      }
+      // 활채가 brace에 도달하면 분리
+      if (q <= 0.005) {
+        arrowState.onString = false;
+      }
+
+    } else {
+      // ── 분리 후: 화살은 자유 비행, 활채는 자유 진동 ──
+      // 활채 자유 진동 (시위 반력 없음, 복원력만)
+      const limbState2 = interpolateBowByQ(samples, q);
+      const F_restore = limbState2.F_draw;
+      const k_local = Math.abs(F_restore) / Math.max(Math.abs(q), 0.01);
+      const q_accel = -F_restore / m_eff_limb - 2 * zeta_limb * Math.sqrt(k_local / m_eff_limb) * q_dot;
+      q += q_dot * dt + 0.5 * q_accel * dt * dt;
+      q_dot += q_accel * dt;
+      if (q < -0.15) q = -0.15;
+
+      // 화살 자유 적분
+      stepLumpedMass(arrowState, limbState, restPos, dt, 0);
     }
-    if (!state.onString && !separated) {
+
+    // 분리 감지 → 모달 전환
+    if (!arrowState.onString && !separated) {
       separated = true;
-      phase2Data = computeModalAmplitudes(state, arrowProps, modes);
-      phase2Data.t_separation = t * 1000; // ms
+      phase2Data = computeModalAmplitudes(arrowState, arrowProps, modes);
+      phase2Data.t_separation = t * 1000;
       phase2Data.bowVibParams = vibParams;
       phase2Data.modes = modes;
+      // 활채 진동 정보도 저장
+      phase2Data.limb_q0 = q;
+      phase2Data.limb_qdot0 = q_dot;
+      phase2Data.m_eff_limb = m_eff_limb;
     }
 
-    // 재접촉 에러 시 조기 종료
-    if (state.recontactError && separated) {
+    // 분리 후 0.5ms → 모달 전환
+    if (separated && (t * 1000 - phase2Data.t_separation) > 0.5) break;
+
+    // 재접촉 에러
+    if (arrowState.recontactError && separated) {
       phase1Frames.push({
-        t_ms: t * 1000, drawAmount,
-        nodes: Array.from({ length: state.N }, (_, i) => ({ x: state.x[i], y: state.y[i] })),
-        contactState: state.wasInContact ? 'contact' : 'free',
-        onString: state.onString, recontactError: true,
+        t_ms: t * 1000, drawAmount: limbState.drawAmount,
+        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i] })),
+        contactState: arrowState.wasInContact ? 'contact' : 'free',
+        onString: arrowState.onString, recontactError: true, q,
       });
-      break;
-    }
-
-    // 분리 후 0.5ms 경과하면 lumped-mass 중단 → 모달로 전환
-    // (lumped-mass는 분리 후 stiff ODE로 불안정해지므로)
-    if (separated && (t * 1000 - phase2Data.t_separation) > 0.5) {
       break;
     }
 
@@ -1951,31 +2135,29 @@ function simulateRelease(params) {
     if (step % storeInterval === 0) {
       phase1Frames.push({
         t_ms: t * 1000,
-        drawAmount,
-        nodes: Array.from({ length: state.N }, (_, i) => ({ x: state.x[i], y: state.y[i] })),
-        contactState: state.wasInContact ? 'contact' : 'free',
-        onString: state.onString,
-        recontactError: state.recontactError,
+        drawAmount: limbState.drawAmount,
+        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i] })),
+        contactState: arrowState.wasInContact ? 'contact' : 'free',
+        onString: arrowState.onString,
+        recontactError: arrowState.recontactError,
+        q, q_dot,
       });
     }
   }
 
   // 분리 안 됐으면 최종 상태에서 모달 투영
   if (!phase2Data) {
-    state.onString = false;
-    phase2Data = computeModalAmplitudes(state, arrowProps, modes);
+    arrowState.onString = false;
+    phase2Data = computeModalAmplitudes(arrowState, arrowProps, modes);
     phase2Data.t_separation = T_MAX * 1000;
     phase2Data.bowVibParams = vibParams;
     phase2Data.modes = modes;
+    phase2Data.limb_q0 = q;
+    phase2Data.limb_qdot0 = q_dot;
+    phase2Data.m_eff_limb = m_eff_limb;
   }
 
-  return {
-    phase1Frames,
-    phase2Data,
-    arrowProps,
-    samples,
-    releaseTime_ms: releaseTime * 1000,
-  };
+  return { phase1Frames, phase2Data, arrowProps, samples };
 }
 
 // 모달 중첩으로 임의 시각의 화살 형상 계산 (Phase 2)
@@ -2515,14 +2697,22 @@ function KoreanBow3D() {
           setDrawAmount(d);
           if (d >= 1) { anim.phase = "holding"; anim.t = 0; setAnimPhase("holding"); }
         } else if (anim.phase === "holding") {
+          window.__DEBUG_HOLDING = (window.__DEBUG_HOLDING || 0) + 1;
           // 만작 상태 저장 (발시 시 사용)
           if (!anim.savedFullDraw) {
             anim.savedFullDraw = bowGeomDataRef.current;
           }
           // lumped-mass 시뮬레이션 사전 계산 (1회)
           if (!anim.releaseData) {
-            anim.releaseData = simulateRelease(params);
-            window.__DEBUG_RELEASE = anim.releaseData;
+            window.__DEBUG_SIM_START = Date.now();
+            try {
+              anim.releaseData = simulateRelease(params);
+              window.__DEBUG_RELEASE = anim.releaseData;
+              window.__DEBUG_SIM_END = Date.now();
+            } catch(e) {
+              window.__DEBUG_RELEASE_ERROR = e.message + ' | ' + e.stack;
+              window.__DEBUG_SIM_END = Date.now();
+            }
           }
           if (anim.t > 0.5) { anim.phase = "releasing"; anim.t = 0; setAnimPhase("releasing"); }
         } else if (anim.phase === "releasing") {
@@ -2824,6 +3014,7 @@ function KoreanBow3D() {
   }, []);
 
   const startAnimation = () => {
+    window.__DEBUG_START_ANIM = Date.now();
     // 조그 모드 종료
     if (jogMode) exitJogMode();
     // 이전 비행 화살 정리
