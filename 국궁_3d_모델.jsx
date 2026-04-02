@@ -1706,15 +1706,10 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
     ax[i] = bend.fx[i] / m[i];
     ay[i] = (bend.fy[i] - m[i] * g_accel) / m[i];
   }
-  // 시위력: 비신장 봉의 축방향 가속은 전체 노드에 균등 분배
-  // (축방향 음파 전파 >> dt이므로 즉시 전달 가정)
-  if (state.onString) {
-    const a_str_x = strF.Fx / M_total;
-    const a_str_y = strF.Fy / M_total;
-    for (let i = 0; i < N; i++) {
-      ax[i] += a_str_x;
-      ay[i] += a_str_y;
-    }
+  // 시위력: nock이 시위 위치에 구속되므로 축방향(Fx)은 구속이 처리
+  // 횡방향(Fy)만 nock 노드에 적용 (archer's paradox 원인)
+  if (state.onString && strF.Fy !== 0) {
+    ay[0] += strF.Fy / m[0];
   }
   if (restF.Fy !== 0) {
     ay[restF.nodeIndex] += restF.Fy / m[restF.nodeIndex];
@@ -1726,13 +1721,17 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
     y[i] += vy[i] * dt + 0.5 * ay[i] * dt * dt;
   }
 
-  // onString: nock이 시위보다 앞서가면(x가 더 작으면) 시위 위치로 제한
-  // 시위가 nock을 밀지만, nock이 시위 뒤로 빠지는 것은 방지
+  // onString: nock은 시위 위치에 구속 (시위가 nock을 구동)
+  // nock이 시위보다 앞서갈 수 없음 (시위가 밀어주는 구조)
+  // nock이 시위보다 뒤처지면 → 분리 (시위가 돌아가는데 화살이 안 따라감)
   if (state.onString) {
-    if (x[0] > bowState.nockX) {
-      x[0] = bowState.nockX; // nock이 시위 뒤에 있으면 시위에 맞춤
+    if (x[0] > bowState.nockX + 0.001) {
+      // nock이 시위보다 뒤에 있음 → 시위가 이미 앞으로 갔는데 화살이 못 따라감 → 분리
+      state.onString = false;
+    } else {
+      // nock을 시위 위치에 고정 (시위가 구동)
+      x[0] = bowState.nockX;
     }
-    // nock이 시위보다 앞서가면 그대로 둠 → 분리 조건에서 처리
   }
 
   // 4) 거리 구속 (SHAKE)
