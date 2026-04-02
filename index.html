@@ -1918,6 +1918,10 @@ function simulateRelease(params) {
     stepLumpedMass(state, bowState, restPos, dt, drawAmount);
 
     // 시위 분리 감지
+    // on-string 최대 시간 제한: 10ms 이후 강제 분리 (SHAKE 누적 오차 방지)
+    if (state.onString && t > 0.010) {
+      state.onString = false;
+    }
     if (!state.onString && !separated) {
       separated = true;
       phase2Data = computeModalAmplitudes(state, arrowProps, modes);
