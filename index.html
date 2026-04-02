@@ -1691,21 +1691,33 @@ function computeBendingForces(state) {
 }
 
 // SHAKE 거리 구속 (비신장 조건 유지)
-function enforceDistanceConstraints(state, iterations = 4) {
-  const { N, ds, x, y, m, onString } = state;
-  for (let iter = 0; iter < iterations; iter++) {
+function enforceDistanceConstraints(state, iterations = 4, pinnedNode = -1) {
+  const { N, ds, x, y, m } = state;
+  if (pinnedNode === 0) {
+    // 선형 체인 + nock 고정: 순방향 직접 풀이 (O(N), 정확)
     for (let i = 0; i < N - 1; i++) {
       const dx = x[i + 1] - x[i];
       const dy = y[i + 1] - y[i];
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < 1e-12) continue;
-      const err = dist - ds;
-      const correction = err / dist * 0.5;
+      const scale = ds / dist;
+      x[i + 1] = x[i] + dx * scale;
+      y[i + 1] = y[i] + dy * scale;
+    }
+  } else {
+    // 일반 SHAKE (분리 후 자유 비행)
+    for (let iter = 0; iter < iterations; iter++) {
+      for (let i = 0; i < N - 1; i++) {
+        const dx = x[i + 1] - x[i];
+        const dy = y[i + 1] - y[i];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1e-12) continue;
+        const err = dist - ds;
+        const correction = err / dist * 0.5;
 
-      const wi = 1 / m[i], wj = 1 / m[i + 1];
-      const sumW = wi + wj;
+        const wi = 1 / m[i], wj = 1 / m[i + 1];
+        const sumW = wi + wj;
 
-      {
         x[i] += correction * (wi / sumW) * dx;
         y[i] += correction * (wi / sumW) * dy;
         x[i + 1] -= correction * (wj / sumW) * dx;
@@ -1963,9 +1975,11 @@ function simulateRelease(params) {
   const restPos = fullDraw.restPoint;
   const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos);
 
-  // 시위 상현/하현 고정 길이 (만작 시점의 값 사용)
-  const L_upper = fullDraw.L_upper;
-  const L_lower = fullDraw.L_lower;
+  // 시위 상현/하현 고정 길이 — nockPos 기준으로 재계산하여 정합성 보장
+  const _dxT = fullDraw.anchorTop.x - nockPos.x, _dyT = fullDraw.anchorTop.y - nockPos.y;
+  const _dxB = fullDraw.anchorBot.x - nockPos.x, _dyB = fullDraw.anchorBot.y - nockPos.y;
+  const L_upper = Math.sqrt(_dxT * _dxT + _dyT * _dyT);
+  const L_lower = Math.sqrt(_dxB * _dxB + _dyB * _dyB);
 
   // 활채 상태: q = nockX - nockX_brace, q_dot = 0
   let q = fullDraw.q;      // 만작 변위
@@ -2014,53 +2028,55 @@ function simulateRelease(params) {
       const e_sum_x = eT.x + eB.x;
       const e_sum_y = eT.y + eB.y;
 
-      // T = 정적 평형 장력 (q에서의 시위 장력, 사전 샘플에서 보간)
-      // 동적 보정은 무시 (정적 T가 1차 근사로 충분)
-      const T_string = limbState.T_current;
+      // ── D. 동적 T 계산 (분리 판정용) ──
+      // Klopsteg 결합 모델: 화살이 받는 힘 = F_restore × m_arrow / m_coupled
+      const F_restore_sep = limbState.F_draw;
+      const m_coupled_sep = m_eff_limb + arrowProps.m_total;
+      const T_dynamic = Math.abs(F_restore_sep) * arrowProps.m_total / m_coupled_sep;
+      const e_sum_len = Math.sqrt(e_sum_x * e_sum_x + e_sum_y * e_sum_y) || 1e-6;
+      const Fx = T_dynamic * e_sum_x / e_sum_len;
+      const Fy = T_dynamic * e_sum_y / e_sum_len;
 
-      // ── D. 화살에 시위력 적용 (Fx + Fy 모두) ──
-      const Fx = T_string * e_sum_x;
-      const Fy = T_string * e_sum_y;
-
-      // nock을 시위 위치로 직접 이동 (SHAKE 대신 직접 투영)
-      arrowState.x[0] = nockTarget.x;
-      arrowState.y[0] = nockTarget.y;
-
-      // ── E. 활채 ODE: 복원력 - 시위 반력 ──
-      // 시위가 활채를 당기는 힘 = T × cos(시위-q방향 각도) ≈ T × e_sum_x (q ≈ x 방향)
-      const F_restore = limbState.F_draw; // 정적 복원력 (q 위치에서)
-      // 활채 ODE: 복원력은 활채를 brace로 끌고 가고, 시위 장력은 화살이 연결된 동안 저항
-      // F_restore > 0 (만작에서 brace 방향), T가 화살을 가속하면서 활채에 반력
-      // 화살이 충분히 가속되면 T가 줄어들어 활채가 빠르게 복원
-      // 순가속도 = -(F_restore - T × proj) / m_eff (brace 방향 = q 감소)
-      const cosProj = Math.abs(e_sum_x); // 시위력의 q방향 투영
-      const F_net_limb = -F_restore; // 복원력만 (T 반력은 nock 구속으로 암묵 처리)
+      // ── E. 활채 ODE: Klopsteg 결합 모델 ──
+      const F_restore = limbState.F_draw;
+      const m_coupled = m_eff_limb + arrowProps.m_total;
       const k_local = Math.abs(F_restore) / Math.max(Math.abs(q), 0.01);
-      const q_accel = F_net_limb / m_eff_limb - 2 * zeta_limb * Math.sqrt(k_local / m_eff_limb) * q_dot;
+      const q_accel = -F_restore / m_coupled - 2 * zeta_limb * Math.sqrt(k_local / m_coupled) * q_dot;
 
       // 활채 Verlet
       q += q_dot * dt + 0.5 * q_accel * dt * dt;
       q_dot += q_accel * dt;
-      // q를 0 이하로 제한 (brace를 넘어가지 않도록 — 오버슈트는 나중에 처리)
-      // 실제로는 오버슈트 허용 (활채가 brace를 지나감)
-      if (q < -0.15) q = -0.15; // 물리적 한계
+      if (q < -0.15) q = -0.15;
 
-      // ── F. 화살 나머지 노드 적분 (bending + gravity + rest) ──
-      // 시위력은 이미 nock 위치 직접 투영으로 적용됨
-      // 나머지 노드만 Verlet
+      // ── F. 화살 적분: 강체 병진 + 굽힘 섭동 ──
       const { N, x, y, vx, vy, m } = arrowState;
       const x_old = Float64Array.from(x);
       const y_old = Float64Array.from(y);
 
+      // 1) 강체 병진: nock 변위를 전체 노드에 적용 (시위가 화살 전체를 민다)
+      const dx_rigid = nockTarget.x - x[0];
+      const dy_rigid = nockTarget.y - y[0];
+      for (let i = 0; i < N; i++) {
+        x[i] += dx_rigid;
+        y[i] += dy_rigid;
+      }
+
+      // 2) 굽힘 섭동: bending + gravity + rest (강체 위의 미소 변형)
       const bend = computeBendingForces(arrowState);
       const restF = computeRestContactForce(arrowState, restPos);
-      for (let i = 1; i < N; i++) { // i=0(nock)은 이미 투영됨
+      for (let i = 1; i < N; i++) {
         const ax_i = bend.fx[i] / m[i];
         const ay_i = (bend.fy[i] - m[i] * 9.81) / m[i] + (i === restF.nodeIndex && restF.Fy ? restF.Fy / m[i] : 0);
-        x[i] += vx[i] * dt + 0.5 * ax_i * dt * dt;
-        y[i] += vy[i] * dt + 0.5 * ay_i * dt * dt;
+        x[i] += 0.5 * ax_i * dt * dt;  // 강체 속도는 이미 병진으로 반영됨
+        y[i] += 0.5 * ay_i * dt * dt;
       }
-      enforceDistanceConstraints(arrowState, 30);
+
+      // 3) SHAKE: 미소 보정만 필요 (강체 병진이 대부분 처리)
+      enforceDistanceConstraints(arrowState, 30, 0);
+      // nock 재투영
+      arrowState.x[0] = nockTarget.x;
+      arrowState.y[0] = nockTarget.y;
+      // 속도
       for (let i = 0; i < N; i++) {
         vx[i] = (x[i] - x_old[i]) / dt;
         vy[i] = (y[i] - y_old[i]) / dt;
@@ -2115,6 +2131,16 @@ function simulateRelease(params) {
       phase2Data.limb_q0 = q;
       phase2Data.limb_qdot0 = q_dot;
       phase2Data.m_eff_limb = m_eff_limb;
+      // 에너지 감사
+      const _cmvx = phase2Data.CoM.vx, _cmvy = phase2Data.CoM.vy;
+      const _KE_arrow = 0.5 * arrowProps.m_total * (_cmvx * _cmvx + _cmvy * _cmvy);
+      const _KE_limb = 0.5 * m_eff_limb * q_dot * q_dot;
+      phase2Data.energyAudit = {
+        E_stored: vibParams.E_stored,
+        KE_arrow: _KE_arrow,
+        KE_limb: _KE_limb,
+        eta: vibParams.E_stored > 0 ? _KE_arrow / vibParams.E_stored : 0,
+      };
     }
 
     // 분리 후 0.5ms → 모달 전환

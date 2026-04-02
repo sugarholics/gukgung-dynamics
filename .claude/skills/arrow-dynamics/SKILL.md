@@ -88,20 +88,23 @@ m_virtual ≈ 0.033 kg
 | Rest contactCount | 0 또는 1 | ≥2 = 재접촉 에러 |
 | Spine 검증 | 입력 = 역산 | AMO 공식 오류 |
 
-## 현재 상태 (2026-04-02)
+## 현재 상태 (2026-04-03)
 
 **동작 확인됨:**
-- 활채 q 감소, 시위 분리 자동 감지, 모달 전환, 조그셔틀 3단
+- v_arrow = -37.7 m/s (Klopsteg η = 0.329) ✓
+- CoM vy = 0.00 m/s ✓
+- 모달 A1 = 0.1 mm (강체 병진 모델, 횡력 미적용) ✓
+- 에너지 보존: KE_arrow + KE_limb ≈ 0.92 × E_stored ✓
+- t_separation = 20.69 ms (q ≈ 0에서 분리)
 
 **남은 과제:**
-- v_arrow = -19.1 (예상 ~37) → T 동적 계산 필요
-- CoM vy = +9.17 → 원-원 교점 초기 y 불연속 보정
-- 모달 A1 = 81.7mm → on-string 감쇠 강화
+- Archer's paradox 미반영: 시위 횡력 → 화살 횡변위 → A1 ≈ 3~8 mm 예상
 
 ## 자주 발생하는 실수
 
-1. **nock 위치 구속 vs 힘 적용 혼동**: nock을 `x[0] = nockX`로 구속하면 에너지 주입/소산 발생. 현재는 원-원 교점 투영 사용.
-2. **SHAKE 반복 부족**: 4회 → 체인 전파 불완전. 최소 N×2 = 24회 필요.
-3. **θ 클램핑 미적용**: 대각도 굽힘력이 발산 → |θ| ≤ 0.25 rad 제한 필수.
-4. **시위력 분배 방식**: nock 노드에만 전체 시위력 적용 → 84,000 m/s² 가속 → 체인 붕괴. 현재는 nock 위치 투영 + 나머지 노드 SHAKE 전파.
-5. **분리 후 lumped-mass 장시간 실행**: 분리 후 0.5ms 이내에 모달로 전환 필수 (stiff ODE 발산).
+1. **SHAKE 수렴 부족으로 에너지 배분 왜곡**: Gauss-Seidel SHAKE는 선형 체인에서 스펙트럴 반경 ≈ cos(π/N). N=11이면 30회에 71%만 수렴. 해결: on-string에서 **강체 병진 + 굽힘 섭동** 방식 사용 (SHAKE에 의존하지 않음).
+2. **x_old 저장 시점 중요**: nock 투영 전에 x_old를 저장해야 nock 속도가 올바르게 계산됨. 투영 후 저장하면 vx[0] ≈ 0이 되어 에너지 전달 안 됨.
+3. **활채 ODE에 화살 질량 결합 필수**: `m_coupled = m_eff_limb + m_arrow`. 활채만 m_eff로 가속하면 화살보다 빨리 복원 → 에너지 전달 부족.
+4. **L_upper/L_lower는 nockPos와 정합**: preSampleBowAnchors의 L_upper/L_lower는 fullDraw의 anchorTop/Bot에서 nockPos까지의 거리로 재계산 필요.
+5. **θ 클램핑 미적용**: 대각도 굽힘력이 발산 → |θ| ≤ 0.25 rad 제한 필수.
+6. **분리 후 lumped-mass 장시간 실행**: 분리 후 0.5ms 이내에 모달로 전환 필수 (stiff ODE 발산).
