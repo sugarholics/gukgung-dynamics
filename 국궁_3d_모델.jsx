@@ -1548,7 +1548,12 @@ function computeBendingForces(state) {
     // 굽힘 각도 θ (signed, cross product)
     const cross = e1x * e2y - e1y * e2x;
     const dot = e1x * e2x + e1y * e2y;
-    const theta = Math.atan2(cross, dot);
+    let theta = Math.atan2(cross, dot);
+
+    // 곡률 제한: 화살의 물리적 휨 범위는 ±15° 이내
+    // 이를 넘으면 시뮬레이션 불안정 → 클램핑
+    const MAX_THETA = 0.25; // ~14.3°
+    theta = Math.max(-MAX_THETA, Math.min(MAX_THETA, theta));
 
     // dE/dθ = EI * θ / ds
     const coeff = EI * theta / ds;
@@ -1693,13 +1698,23 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
   // 2) 가속도
   const ax = new Float64Array(N);
   const ay = new Float64Array(N);
+  // 전체 질량
+  let M_total = 0;
+  for (let i = 0; i < N; i++) M_total += m[i];
+
   for (let i = 0; i < N; i++) {
     ax[i] = bend.fx[i] / m[i];
     ay[i] = (bend.fy[i] - m[i] * g_accel) / m[i];
   }
+  // 시위력: 비신장 봉의 축방향 가속은 전체 노드에 균등 분배
+  // (축방향 음파 전파 >> dt이므로 즉시 전달 가정)
   if (state.onString) {
-    ax[0] += strF.Fx / m[0];
-    ay[0] += strF.Fy / m[0];
+    const a_str_x = strF.Fx / M_total;
+    const a_str_y = strF.Fy / M_total;
+    for (let i = 0; i < N; i++) {
+      ax[i] += a_str_x;
+      ay[i] += a_str_y;
+    }
   }
   if (restF.Fy !== 0) {
     ay[restF.nodeIndex] += restF.Fy / m[restF.nodeIndex];
@@ -1721,12 +1736,22 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
   }
 
   // 4) 거리 구속 (SHAKE)
-  enforceDistanceConstraints(state, 4);
+  enforceDistanceConstraints(state, 30);
 
   // 5) 속도 = (보정된 위치 - 이전 위치) / dt (구속력 임펄스 자동 반영)
   for (let i = 0; i < N; i++) {
     vx[i] = (x[i] - x_old[i]) / dt;
     vy[i] = (y[i] - y_old[i]) / dt;
+  }
+
+  // 6) 고주파 감쇠: 인접 노드 속도 차이를 줄여 지그재그 방지
+  // Laplacian smoothing of velocity (약한 수치 점성)
+  const alpha = 0.05; // 감쇠 계수 (0=없음, 0.1=강함)
+  for (let i = 1; i < N - 1; i++) {
+    const avgVx = (vx[i - 1] + vx[i + 1]) / 2;
+    const avgVy = (vy[i - 1] + vy[i + 1]) / 2;
+    vx[i] += alpha * (avgVx - vx[i]);
+    vy[i] += alpha * (avgVy - vy[i]);
   }
 }
 
@@ -1886,15 +1911,18 @@ function simulateRelease(params) {
 
     // 재접촉 에러 시 조기 종료
     if (state.recontactError && separated) {
-      // 에러 프레임 저장 후 종료
       phase1Frames.push({
-        t_ms: t * 1000,
-        drawAmount,
+        t_ms: t * 1000, drawAmount,
         nodes: Array.from({ length: state.N }, (_, i) => ({ x: state.x[i], y: state.y[i] })),
         contactState: state.wasInContact ? 'contact' : 'free',
-        onString: state.onString,
-        recontactError: true,
+        onString: state.onString, recontactError: true,
       });
+      break;
+    }
+
+    // 분리 후 0.5ms 경과하면 lumped-mass 중단 → 모달로 전환
+    // (lumped-mass는 분리 후 stiff ODE로 불안정해지므로)
+    if (separated && (t * 1000 - phase2Data.t_separation) > 0.5) {
       break;
     }
 
