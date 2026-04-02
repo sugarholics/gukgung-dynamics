@@ -2244,6 +2244,8 @@ export default function KoreanBow3D() {
   const RELEASE_MS = 100; // 시위 풀림 시간 (ms)
   const [jogMode, setJogMode] = useState(false);
   const [jogTime, setJogTime] = useState(0); // ms 단위
+  const [jogStep, setJogStep] = useState(0.1); // 드래그 단위 (ms)
+  const jogDragRef = useRef({ dragging: false, startX: 0, startTime: 0 });
   const jogDataRef = useRef(null);
   const restShapeRef = useRef(null);
 
@@ -3170,40 +3172,87 @@ export default function KoreanBow3D() {
             return (
               <div style={{
                 position: "absolute", bottom: 70, left: "50%", transform: "translateX(-50%)",
-                background: "rgba(10,10,40,0.95)", borderRadius: 10, padding: "10px 12px",
-                border: "1px solid #555599", display: "flex", alignItems: "center", gap: 4,
+                background: "rgba(10,10,40,0.95)", borderRadius: 10, padding: "8px 12px",
+                border: "1px solid #555599", display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
                 fontFamily: "monospace", fontSize: 12, userSelect: "none", whiteSpace: "nowrap"
               }}>
-                <button onClick={() => setJogTime(t => Math.max(0, t - 10))} style={btnStyle()}>
-                  -10
-                </button>
-                <button onClick={() => setJogTime(t => Math.max(0, +(t - 0.1).toFixed(2)))} style={btnStyle()}>
-                  -0.1
-                </button>
-                <button onClick={() => setJogTime(t => Math.max(0, +(t - 0.01).toFixed(2)))} style={btnStyle()}>
-                  -.01
-                </button>
-                <div style={{
-                  minWidth: 80, textAlign: "center", color: "#ffdd66", fontWeight: 700, fontSize: 14
-                }}>
-                  {jogTime.toFixed(2)}
+                {/* 드래그 슬라이드 휠 */}
+                <div
+                  style={{
+                    width: "100%", height: 28, background: "linear-gradient(90deg, #1a1a44 0%, #2a2a66 50%, #1a1a44 100%)",
+                    borderRadius: 14, cursor: "ew-resize", position: "relative", overflow: "hidden",
+                    border: "1px solid #444488", touchAction: "none"
+                  }}
+                  onPointerDown={e => {
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    jogDragRef.current = { dragging: true, startX: e.clientX, startTime: jogTime, accum: 0 };
+                  }}
+                  onPointerMove={e => {
+                    e.stopPropagation();
+                    const d = jogDragRef.current;
+                    if (!d.dragging) return;
+                    const dx = e.clientX - d.startX;
+                    const pixPerStep = 12;
+                    const steps = Math.trunc(dx / pixPerStep);
+                    const newAccum = steps;
+                    if (newAccum !== d.accum) {
+                      const delta = (newAccum - d.accum) * jogStep;
+                      setJogTime(t => {
+                        const next = +(t + delta).toFixed(4);
+                        return Math.max(0, Math.min(2000, +next.toFixed(2)));
+                      });
+                      d.accum = newAccum;
+                    }
+                  }}
+                  onPointerUp={e => { jogDragRef.current.dragging = false; }}
+                  onPointerCancel={e => { jogDragRef.current.dragging = false; }}
+                >
+                  {/* 중앙 표시선 + 눈금 패턴 */}
+                  <div style={{ position: "absolute", top: 0, bottom: 0, left: "50%", width: 2, background: "#ffdd66", transform: "translateX(-50%)" }} />
+                  {Array.from({ length: 21 }, (_, i) => (
+                    <div key={i} style={{
+                      position: "absolute", top: i % 5 === 0 ? 4 : 8, bottom: i % 5 === 0 ? 4 : 8,
+                      left: `${(i / 20) * 100}%`, width: 1, background: "rgba(136,136,255,0.3)"
+                    }} />
+                  ))}
+                  <div style={{
+                    position: "absolute", top: 2, right: 6, fontSize: 9, color: "#8888cc", pointerEvents: "none"
+                  }}>◁ {jogStep}ms/칸 ▷</div>
                 </div>
-                <span style={{ color: "#888", fontSize: 11 }}>ms</span>
-                <button onClick={() => setJogTime(t => Math.min(2000, +(t + 0.01).toFixed(2)))} style={btnStyle()}>
-                  +.01
-                </button>
-                <button onClick={() => setJogTime(t => Math.min(2000, +(t + 0.1).toFixed(2)))} style={btnStyle()}>
-                  +0.1
-                </button>
-                <button onClick={() => setJogTime(t => Math.min(2000, t + 10))} style={btnStyle()}>
-                  +10
-                </button>
-                <div style={{ marginLeft: 8, fontSize: 11, color: infoColor, minWidth: 80 }}>
-                  {info}
+                {/* 버튼 행 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <button onClick={() => { setJogStep(10); setJogTime(t => Math.max(0, t - 10)); }} style={btnStyle(jogStep === 10 ? "#445588" : undefined)}>
+                    -10
+                  </button>
+                  <button onClick={() => { setJogStep(0.1); setJogTime(t => Math.max(0, +(t - 0.1).toFixed(2))); }} style={btnStyle(jogStep === 0.1 ? "#445588" : undefined)}>
+                    -0.1
+                  </button>
+                  <button onClick={() => { setJogStep(0.01); setJogTime(t => Math.max(0, +(t - 0.01).toFixed(2))); }} style={btnStyle(jogStep === 0.01 ? "#445588" : undefined)}>
+                    -.01
+                  </button>
+                  <div style={{
+                    minWidth: 80, textAlign: "center", color: "#ffdd66", fontWeight: 700, fontSize: 14
+                  }}>
+                    {jogTime.toFixed(2)}
+                  </div>
+                  <span style={{ color: "#888", fontSize: 11 }}>ms</span>
+                  <button onClick={() => { setJogStep(0.01); setJogTime(t => Math.min(2000, +(t + 0.01).toFixed(2))); }} style={btnStyle(jogStep === 0.01 ? "#445588" : undefined)}>
+                    +.01
+                  </button>
+                  <button onClick={() => { setJogStep(0.1); setJogTime(t => Math.min(2000, +(t + 0.1).toFixed(2))); }} style={btnStyle(jogStep === 0.1 ? "#445588" : undefined)}>
+                    +0.1
+                  </button>
+                  <button onClick={() => { setJogStep(10); setJogTime(t => Math.min(2000, t + 10)); }} style={btnStyle(jogStep === 10 ? "#445588" : undefined)}>
+                    +10
+                  </button>
+                  <div style={{ marginLeft: 8, fontSize: 11, color: infoColor, minWidth: 80 }}>
+                    {info}
+                  </div>
+                  <button onClick={exitJogMode} style={btnStyle("#662222")}>
+                    ✕
+                  </button>
                 </div>
-                <button onClick={exitJogMode} style={btnStyle("#662222")}>
-                  ✕
-                </button>
               </div>
             );
           })()}
