@@ -9,7 +9,7 @@
 ### 파일 구조
 ```
 국궁 동역학/
-├── 국궁_3d_모델.jsx    # 메인 React/Three.js 소스 (~1600줄)
+├── 국궁_3d_모델.jsx    # 메인 React/Three.js 소스 (~2100줄)
 ├── index.html           # 빌드 결과 (브라우저용)
 ├── build_html.js        # 빌드 스크립트
 ├── CLAUDE.md            # 이 파일
@@ -48,6 +48,8 @@ solveDraw(params, targetNockX, braceResult)  ← loadFactor+T 하이브리드 dr
     ↓
 generateBowGeometry(params, drawAmount)      ← 전체 통합 (brace→draw→형상 조립)
     ↓
+computeGripReaction(params, bowGeom)          ← 줌통 반력/토크/이상점 계산
+    ↓
 computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 기반
 ```
 
@@ -65,6 +67,7 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 | `solveDraw` | 하이브리드 draw 솔버 (loadFactor + T/F 역산) | (params, targetNockX, braceResult) → {state, T_draw, F_draw, ...} |
 | `generateBowGeometry` | 전체 기하학 통합 | (params, drawAmount) → {limbPoints, T_current, F_draw, ...} |
 | `computeNockX` | loadFactor→nockX 순방향 매핑 (레거시) | (params, loadFactor) → {nockX, state, mode} |
+| `computeGripReaction` | 줌통 반력/토크/이상점 계산 | (params, bowGeom) → {Fx, Fy, M_grip, reactionPointY} |
 | `computeVibrationParams` | 진동 파라미터 (F_draw 기반) | (params) → {omega0, omega_d, zeta, A_grip, k_eff, E_stored} |
 
 ### 좌표계
@@ -105,6 +108,9 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 | gripAngle | 10° | 줌통 V자 각도 | 리커브 프로파일 |
 | gripStiffnessRatio | 15 | 줌통/활채 강성비 | 줌통 탄성 거동 |
 | limbAsymmetryRatio | 1.0 | 하채 EI / 상채 EI 비율 (0.8~1.5) | 비대칭 굽힘, nockY 편향 |
+| nockingOffset | 0.005 m | 오니 y오프셋 (화살대 직경) | 화살 기울기 |
+| pullOffset | -0.015 m | 당김점 y오프셋 (엄지 위치) | 초기발사각 |
+| restOffsetY | -0.005 m | 화살걸이 y오프셋 | 화살 rest 위치 |
 
 **검증된 물리량** (기본 파라미터):
 - Brace height: 15.0 cm ✓
@@ -125,4 +131,4 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 - 빌드 후 반드시 캐시 우회 (URL `?v=N` 또는 hard reload)
 - React 내부 값 디버그: `window.__DEBUG_*` 전역변수 패턴 사용
 - Edit tool 사용 시: 반드시 먼저 Read로 정확한 텍스트 확인 후 교체
-- 1600줄 파일이므로 전체 Read 금지: offset/limit로 필요한 부분만 읽기
+- 2100줄 파일이므로 전체 Read 금지: offset/limit로 필요한 부분만 읽기
