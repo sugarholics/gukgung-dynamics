@@ -7,7 +7,7 @@ description: "국궁 물리 엔진 수정 스킬. 활채 굽힘, 시위 솔버, 
 
 ## 파일 구조 맵
 
-메인 파일: `국궁_3d_모델.jsx` (~2000줄)
+메인 파일: `국궁_3d_모델.jsx` (~2100줄)
 
 물리 관련 함수들의 위치와 역할 (줄 번호는 변동 가능하므로, 함수명으로 검색할 것):
 
@@ -20,7 +20,7 @@ description: "국궁 물리 엔진 수정 스킬. 활채 굽힘, 시위 솔버, 
 | `computeElasticCenter` | 비대칭 탄성중심 | (params) → elasticCenterY |
 | `computeBowStateWithTension` | T 기반 자기일관 반복 (dual beam 지원) | (params, T, forcePoint, options?) → {beamUpper, beamLower, doraeTop, doraeBottom, yangyangiTop, yangyangiBottom, ...} |
 | `generateBowGeometry` | 전체 기하학 통합 | (params, drawAmount) → {모든 점, 각도, 3점} |
-| `computeGripLoads` | 줌통 하중/토크 | (params, loadFactor) → {drawForce, gripTorque, rootMoment} |
+| `computeGripReaction` | 줌통 반력/토크/이상점 | (params, bowGeom) → {Fx, Fy, M_grip, reactionPointY} |
 | `computeVibrationParams` | 진동 파라미터 | (params) → {omega0, zeta, k_eff, E_stored, A_grip} |
 | `createVibrationState` | 3-DOF 초기 상태 | (vibParams) → state vector |
 | `advanceVibration` | RK4 시간 적분 | (state, dt) → new state |
@@ -36,7 +36,7 @@ computeNockX(params, loadFactor)  ← 1D Newton solver
     ↓
 generateBowGeometry(params, drawAmount)  ← 당김보정1 + 탄성중심
     ↓                    ↓
-computeGripLoads    3점 계산 (pulling, nocking, rest)
+computeGripReaction    4점 계산 (nocking, pulling, rest, gripIdeal)
     ↓
 computeVibrationParams  ← E_stored 사다리꼴 적분
     ↓

@@ -30,10 +30,11 @@ Scene
 │   ├── 촉 (ConeGeometry, 회색)
 │   └── 깃 (PlaneGeometry × 3, 빨강+흰색)
 ├── flyingArrow (THREE.Group) ← 비행 화살 (발시 후)
-├── 3점 마커
-│   ├── 깍지 (SphereGeometry, 빨강)
-│   ├── 오늬자리 (SphereGeometry, 노랑)
-│   └── 화살걸이 (SphereGeometry, 초록)
+├── 4점 마커
+│   ├── 오늬 (SphereGeometry, 노랑) — nocking point
+│   ├── 당김점 (SphereGeometry, 빨강) — pulling point
+│   ├── 화살걸이 (SphereGeometry, 초록) — rest point
+│   └── 줌이상점 (SphereGeometry, 시안) — gripIdeal (토크=0 작용점)
 └── GridHelper (선택적)
 ```
 

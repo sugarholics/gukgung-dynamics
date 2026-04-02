@@ -18,13 +18,13 @@ description: "빌드-테스트-디버그 자동화 스킬. JSX 코드 수정 후
 
 ### 1단계: 빌드
 ```bash
-node /sessions/festive-trusting-goodall/build_html.js
+node build_html.js
 ```
-결과: `mnt/국궁 동역학/index.html` 생성 (~80KB)
+결과: `index.html` 생성 (~80KB). 프로젝트 루트에서 실행할 것.
 
 ### 2단계: 브라우저 로드 (캐시 우회 필수)
 ```
-http://localhost:8080/index.html?v={timestamp}
+http://localhost:8082/index.html?v={timestamp}
 ```
 **절대 규칙**: 빌드할 때마다 URL의 `?v=` 파라미터를 변경할 것. 동일 URL 재방문은 캐시된 구버전을 표시할 수 있다.
 
