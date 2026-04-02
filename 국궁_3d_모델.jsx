@@ -3175,7 +3175,7 @@ export default function KoreanBow3D() {
                 background: "rgba(10,10,40,0.95)", borderRadius: 10, padding: "8px 12px",
                 border: "1px solid #555599", display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
                 fontFamily: "monospace", fontSize: 12, userSelect: "none", whiteSpace: "nowrap"
-              }}>
+              }} onPointerDown={e => e.stopPropagation()} onPointerMove={e => e.stopPropagation()} onPointerUp={e => e.stopPropagation()}>
                 {/* 드래그 슬라이드 휠 */}
                 <div
                   style={{
@@ -3225,11 +3225,11 @@ export default function KoreanBow3D() {
                   <button onClick={() => { setJogStep(10); setJogTime(t => Math.max(0, t - 10)); }} style={btnStyle(jogStep === 10 ? "#445588" : undefined)}>
                     -10
                   </button>
+                  <button onClick={() => { setJogStep(1); setJogTime(t => Math.max(0, +(t - 1).toFixed(2))); }} style={btnStyle(jogStep === 1 ? "#445588" : undefined)}>
+                    -1
+                  </button>
                   <button onClick={() => { setJogStep(0.1); setJogTime(t => Math.max(0, +(t - 0.1).toFixed(2))); }} style={btnStyle(jogStep === 0.1 ? "#445588" : undefined)}>
                     -0.1
-                  </button>
-                  <button onClick={() => { setJogStep(0.01); setJogTime(t => Math.max(0, +(t - 0.01).toFixed(2))); }} style={btnStyle(jogStep === 0.01 ? "#445588" : undefined)}>
-                    -.01
                   </button>
                   <div style={{
                     minWidth: 80, textAlign: "center", color: "#ffdd66", fontWeight: 700, fontSize: 14
@@ -3237,11 +3237,11 @@ export default function KoreanBow3D() {
                     {jogTime.toFixed(2)}
                   </div>
                   <span style={{ color: "#888", fontSize: 11 }}>ms</span>
-                  <button onClick={() => { setJogStep(0.01); setJogTime(t => Math.min(2000, +(t + 0.01).toFixed(2))); }} style={btnStyle(jogStep === 0.01 ? "#445588" : undefined)}>
-                    +.01
-                  </button>
                   <button onClick={() => { setJogStep(0.1); setJogTime(t => Math.min(2000, +(t + 0.1).toFixed(2))); }} style={btnStyle(jogStep === 0.1 ? "#445588" : undefined)}>
                     +0.1
+                  </button>
+                  <button onClick={() => { setJogStep(1); setJogTime(t => Math.min(2000, +(t + 1).toFixed(2))); }} style={btnStyle(jogStep === 1 ? "#445588" : undefined)}>
+                    +1
                   </button>
                   <button onClick={() => { setJogStep(10); setJogTime(t => Math.min(2000, t + 10)); }} style={btnStyle(jogStep === 10 ? "#445588" : undefined)}>
                     +10
