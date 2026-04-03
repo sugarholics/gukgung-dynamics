@@ -57,7 +57,7 @@ const DEFAULT_PARAMS = {
   gripStiffnessRatio: 25, // 줌통/활채 강성비
 
   // 접촉점 오프셋 (사법 모델링)
-  nockingOffset: 0.005,   // 오니 y오프셋 (m) — 시위 힘 중심보다 위 (화살대 직경)
+  nockingOffset: 0.050,   // 오니 y오프셋 (m) — 시위 힘 중심보다 위
   pullOffset: -0.015,     // 당김점 y오프셋 (m) — 오니보다 아래 (엄지 위치)
   restOffsetY: 0.003,     // 화살걸이 y오프셋 (m) — 줌통 중심보다 위
 
@@ -441,6 +441,7 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
     return { dorae, yangyangi, siyahDir: dir };
   }
 
+
   for (let iter = 0; iter < INNER_ITER; iter++) {
     // ── 상채: forcePoint → yangyangiTop 방향 시위 ──
     const { yangyangi: yangyangiTop_iter } = computeSiyahFromBeam(prevBeamUpper);
@@ -460,7 +461,6 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
       const frac = idx - i0;
       const px = prevBeamUpper.points[i0].x * (1 - frac) + prevBeamUpper.points[i0 + 1].x * frac;
       const py = prevBeamUpper.points[i0].y * (1 - frac) + prevBeamUpper.points[i0 + 1].y * frac;
-      // 상채 물리적 위치 = (px, py) 그대로
       const d_perp = (px - forcePoint.x) * uy_upper - (py - forcePoint.y) * ux_upper;
       return (T * d_perp) / EI;
     };
@@ -489,7 +489,6 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
       const frac = idx - i0;
       const px = prevBeamLower.points[i0].x * (1 - frac) + prevBeamLower.points[i0 + 1].x * frac;
       const py = prevBeamLower.points[i0].y * (1 - frac) + prevBeamLower.points[i0 + 1].y * frac;
-      // 적분 좌표계(+y)에서 직접 계산 — forcePointMirrored 사용
       const d_perp = (px - forcePointMirrored.x) * uy_lower - (py - forcePointMirrored.y) * ux_lower;
       return (T * d_perp) / EI;
     };
@@ -510,7 +509,7 @@ function computeBowStateWithTension(params, T, forcePoint, options = {}) {
       maxDelta = Math.max(maxDelta, Math.sqrt(dxL2 * dxL2 + dyL2 * dyL2));
     }
 
-    // Relaxation: 마지막 반복 제외
+    // Relaxation: 마지막 반복 제외 (마지막은 raw 자기일관 해)
     if (iter < INNER_ITER - 1) {
       for (let i = 0; i < newBeamUpper.points.length; i++) {
         newBeamUpper.points[i].x = prevBeamUpper.points[i].x * RELAX + newBeamUpper.points[i].x * (1 - RELAX);
@@ -634,12 +633,25 @@ function solveBrace(params) {
   const { stringLength, siyahLength } = params;
   const targetLen = stringLength;
 
-  let T_lo = 0, T_hi = 3000; // 장력 범위 (N)
-
   let bestState = null;
   let bestMode = 'yangyangi';
   let bestNockX = 0;
   let bestNockY = 0;
+
+  // ── Phase 1: 기하급수 탐색으로 T 상한 좁히기 ──
+  // T를 작은 값부터 2배씩 증가시켜, computedLen < targetLen인 첫 T를 찾음
+  // 이렇게 하면 내부 솔버가 항상 안정적인 T 범위에서만 동작
+  let T_lo = 0, T_hi = 10; // 시작: 10N
+  for (let probe = 0; probe < 15; probe++) { // 10, 20, 40, ..., 163840
+    const state = computeBowStateWithTension(params, T_hi, { x: 0.15, y: 0 });
+    const { computedLen } = computeStringLength(params, state, 0.15, 0);
+    if (computedLen <= targetLen) {
+      // T_hi에서 시위가 충분히 짧음 → [T_hi/2, T_hi]가 유효 범위
+      T_lo = T_hi / 2;
+      break;
+    }
+    T_hi *= 2;
+  }
 
   for (let iter = 0; iter < 50; iter++) {
     const T_mid = (T_lo + T_hi) / 2;
@@ -798,8 +810,9 @@ function solveDraw(params, targetNockX, braceResult) {
   const aB = anchorBot;
 
   // 상채 앵커 기반 T 역산 (레거시 호환: 상채 기준)
-  // pullOffset 적용: 당김점 y오프셋 (엄지 위치) — 오프셋 0이면 종전과 동일
-  const pullY = nockY + (params.pullOffset || 0);
+  // pullOffset 적용: nockingOffset 기준으로 당김점 위치 계산
+  // 당김점 = nock 균형점 + 오니 오프셋 + 당김점 오프셋 (엄지는 오니 아래)
+  const pullY = nockY + (params.nockingOffset || 0) + (params.pullOffset || 0);
   const dxTop = actualNockX - aT.x;
   const dyTop = pullY - aT.y;
   const distTop = Math.sqrt(dxTop * dxTop + dyTop * dyTop);
@@ -1217,7 +1230,7 @@ function generateBowGeometry(params, drawAmount = 0) {
   const currentNockY = drawAmount > 0.001 ? drawNockY : braceNockY;
 
   // 접촉점 오프셋 (사법 모델링)
-  const pullPoint = { x: currentNockX, y: currentNockY + (params.pullOffset || 0) };
+  const pullPoint = { x: currentNockX, y: currentNockY + (params.nockingOffset || 0) + (params.pullOffset || 0) };
   const nockingPoint = { x: currentNockX, y: currentNockY + (params.nockingOffset || 0) };
   const restPoint = { x: 0, y: params.restOffsetY || 0 };
 
@@ -1307,7 +1320,11 @@ function generateBowGeometry(params, drawAmount = 0) {
 function generateStringPath(bowGeom, drawAmount) {
   const { yangyangiTop, yangyangiBottom, doraeTop, doraeBottom, nockX, stringMode } = bowGeom;
 
-  const nockPoint = new THREE.Vector3(nockX, bowGeom.nockY || 0, 0);
+  // 시위 시각적 경로: nockingPoint를 통과 (화살 nock이 시위에 걸린 위치)
+  // pullPoint는 물리 계산(solveDraw)에만 사용하고 시각적으로는 nockingPoint
+  const nockY_vis = (drawAmount > 0.001 && bowGeom.nockingPoint)
+    ? bowGeom.nockingPoint.y : (bowGeom.nockY || 0);
+  const nockPoint = new THREE.Vector3(nockX, nockY_vis, 0);
   const stringPoints = [];
   const subdivPerSeg = 6;
 
@@ -1443,6 +1460,7 @@ function preSampleBowAnchors(params, n = 21) {
       ? { x: g.doraeBottom.x, y: g.doraeBottom.y }
       : { x: g.yangyangiBottom.x, y: g.yangyangiBottom.y };
     const nockPt = g.nockingPoint || { x: g.nockX, y: g.nockY || 0 };
+    const pullPt = g.pullPoint || nockPt;
 
     // 시위 상현/하현 길이 (nock 고정 위치에서)
     const dxT = anchorTop.x - nockPt.x, dyT = anchorTop.y - nockPt.y;
@@ -1458,6 +1476,7 @@ function preSampleBowAnchors(params, n = 21) {
       nockX: g.nockX,
       nockY: g.nockY || 0,
       nockingPoint: { ...nockPt },
+      pullPoint: { ...pullPt },
       restPoint: g.restPoint ? { ...g.restPoint } : { x: 0, y: params.restOffsetY || 0 },
       L_upper, L_lower,
       // q = nock 변위 (brace 기준, 나중에 채움)
@@ -1542,13 +1561,14 @@ function computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower)
   }
 
   // 표준 원-원 교점 공식
+  // a = anchorTop(L_upper의 중심)에서 교점 연결선까지의 거리
   const a = (L_upper * L_upper - L_lower * L_lower + d * d) / (2 * d);
   const h2 = L_upper * L_upper - a * a;
   const h = h2 > 0 ? Math.sqrt(h2) : 0;
 
-  // 앵커 간 중간점 + 법선 방향
-  const mx = anchorBot.x + (a / d) * dx;
-  const my = anchorBot.y + (a / d) * dy;
+  // m = anchorTop에서 anchorBot 방향으로 a만큼 이동한 점
+  const mx = anchorTop.x - (a / d) * dx;
+  const my = anchorTop.y - (a / d) * dy;
 
   // 법선 (두 교점 중 궁사 쪽 = +x 방향을 선택)
   const nx = -dy / d;
@@ -1953,11 +1973,14 @@ function simulateRelease(params) {
   // 3) 만작 상태 초기화
   const fullDraw = samples[samples.length - 1];
   const brace = samples[0];
+  // 발시 후 시위 꺾임점 = nockingPoint (오니 위치)
+  // 당길 때는 엄지(pullPoint)에서 꺾이지만, 발시 후 엄지가 놓이면
+  // 시위에 작용하는 유일한 외력은 화살 nock → 시위는 nockingPoint에서 꺾임
   const nockPos = fullDraw.nockingPoint;
   const restPos = fullDraw.restPoint;
   const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos);
 
-  // 시위 상현/하현 고정 길이 — nockPos 기준으로 재계산하여 정합성 보장
+  // 시위 상현/하현 고정 길이 — nockingPoint 기준 (발시 후 시위 구속점)
   const _dxT = fullDraw.anchorTop.x - nockPos.x, _dyT = fullDraw.anchorTop.y - nockPos.y;
   const _dxB = fullDraw.anchorBot.x - nockPos.x, _dyB = fullDraw.anchorBot.y - nockPos.y;
   const L_upper = Math.sqrt(_dxT * _dxT + _dyT * _dyT);
@@ -1980,6 +2003,8 @@ function simulateRelease(params) {
   let phase2Data = null;
   const totalSteps = Math.ceil(T_MAX / dt);
 
+  let lastNockTarget = { x: nockPos.x, y: nockPos.y }; // 시위 꺾임점 추적 (= nockingPoint)
+
   for (let step = 0; step <= totalSteps; step++) {
     const t = step * dt;
 
@@ -1989,8 +2014,9 @@ function simulateRelease(params) {
     const anchorBot = limbState.anchorBot;
 
     if (arrowState.onString) {
-      // ── B. 시위 구속: 원-원 교점으로 nock 필요 위치 계산 ──
+      // ── B. 시위 구속: 원-원 교점으로 시위 꺾임점 계산 ──
       const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
+      lastNockTarget = { x: nockTarget.x, y: nockTarget.y };
 
       // ── C. 시위 장력 T 계산 (nock을 필요 위치로 이동시키는 구속력) ──
       // nock의 현재 위치와 필요 위치의 차이 → 구속력
@@ -2035,7 +2061,7 @@ function simulateRelease(params) {
       const x_old = Float64Array.from(x);
       const y_old = Float64Array.from(y);
 
-      // 1) 강체 병진: nock 변위를 전체 노드에 적용 (시위가 화살 전체를 민다)
+      // 1) 강체 병진: nock = nockTarget (nockingPoint 기준이므로 오프셋 불필요)
       const dx_rigid = nockTarget.x - x[0];
       const dy_rigid = nockTarget.y - y[0];
       for (let i = 0; i < N; i++) {
@@ -2145,6 +2171,9 @@ function simulateRelease(params) {
         t_ms: t * 1000,
         drawAmount: limbState.drawAmount,
         nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i] })),
+        nockPos: { x: lastNockTarget.x, y: lastNockTarget.y }, // 시위 꺾임점
+        anchorTop: { x: limbState.anchorTop.x, y: limbState.anchorTop.y },
+        anchorBot: { x: limbState.anchorBot.x, y: limbState.anchorBot.y },
         contactState: arrowState.wasInContact ? 'contact' : 'free',
         onString: arrowState.onString,
         recontactError: arrowState.recontactError,
@@ -2179,9 +2208,18 @@ function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
   const cx = CoM.x + CoM.vx * t_post_sec;
   const cy = CoM.y + CoM.vy * t_post_sec - 0.5 * g * t_post_sec * t_post_sec;
 
-  // 비행 각도 (중력에 의해 변화)
+  // 비행 각도: 초기에는 화살 축 방향(axisAngle)에서 시작하여
+  // 시간이 지나면 CoM 속도 방향으로 자연스럽게 전환 (공기역학적 정렬)
   const vy_t = CoM.vy - g * t_post_sec;
-  const flightAngle = Math.atan2(vy_t, CoM.vx);
+  const velocityAngle = Math.atan2(vy_t, CoM.vx);
+  // 전환 시간 상수: ~50ms 이내에 속도 방향으로 정렬
+  const alignTime = 0.05;
+  const blend = Math.min(1, t_post_sec / alignTime);
+  // 각도 차이를 -π~π 범위로 정규화하여 보간
+  let angleDiff = velocityAngle - axisAngle;
+  while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+  while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+  const flightAngle = axisAngle + angleDiff * blend;
 
   // 화살 축 방향
   const ex = Math.cos(flightAngle), ey = Math.sin(flightAngle);
@@ -2254,6 +2292,16 @@ export default function KoreanBow3D() {
   const bowGeomData = useMemo(() => generateBowGeometry(params, drawAmount), [params, drawAmount]);
   const computedBraceHeight = bowGeomData.braceHeight;
   const computedLoadFactor = bowGeomData.loadFactor;
+
+  // 에너지/화살속도: params 변경 시 재계산 (무거우므로 params에만 의존)
+  const energyData = useMemo(() => {
+    const vp = computeVibrationParams(params);
+    const eta = 0.82;
+    const m_arrow = params.arrowMass || 0.025;
+    const v_arrow = Math.sqrt(Math.max(0, 2 * eta * vp.E_stored / m_arrow));
+    const KE_arrow = 0.5 * m_arrow * v_arrow * v_arrow;
+    return { E_stored: vp.E_stored, v_arrow, KE_arrow, eta };
+  }, [params]);
 
   // 렌더 루프(클로저)에서 최신 bowGeomData를 읽을 수 있도록 ref 동기화
   useEffect(() => { bowGeomDataRef.current = bowGeomData; }, [bowGeomData]);
@@ -2530,7 +2578,8 @@ export default function KoreanBow3D() {
     bowGroupRef.current = bowGroup;
 
     // 시위 (양양고자 → nock → 양양고자 직선 경로)
-    if (showString) {
+    // 조그셔틀 활성 시 React 시위를 건너뛰고 jogStringRef로 대체
+    if (showString && !jogMode) {
       const { stringPoints, nockPoint } = generateStringPath(bowGeom, draw);
       const stringGroup = new THREE.Group();
 
@@ -2541,10 +2590,12 @@ export default function KoreanBow3D() {
       });
       const strR = params.stringDiameter * 0.5;
 
-      // 시위는 직선 구간이므로 CatmullRomCurve3로 렌더링
-      const stringCurve = new THREE.CatmullRomCurve3(stringPoints);
-      const stringGeom = new THREE.TubeGeometry(stringCurve, 30, strR, 6, false);
-      stringGroup.add(new THREE.Mesh(stringGeom, stringMat));
+      // 시위를 구간별 직선 튜브로 렌더링 (CatmullRom의 꺾임점 보간 방지)
+      for (let si = 0; si < stringPoints.length - 1; si++) {
+        const segCurve = new THREE.LineCurve3(stringPoints[si], stringPoints[si + 1]);
+        const segGeom = new THREE.TubeGeometry(segCurve, 1, strR, 6, false);
+        stringGroup.add(new THREE.Mesh(segGeom, stringMat));
+      }
 
       // 양양고자 고리 표시 (시위가 고자에 걸리는 O고리)
       const loopMat = new THREE.MeshPhysicalMaterial({ color: 0xd0c0a0, roughness: 0.5 });
@@ -2568,8 +2619,11 @@ export default function KoreanBow3D() {
         const arrowLen = aProps.L;
         const shaftRadius = aProps.D_outer / 2;
 
+        // 화살 Z 오프셋: 활채 폭의 절반 + 여유 → 화살이 활 바깥쪽에 위치
+        const arrowZ = (params.limbWidth || 0.028) / 2 + 0.003;
+
         // 처짐 형상을 따르는 화살대 (TubeGeometry + CatmullRomCurve3)
-        const curvePts = aShape.nodes.map(n => new THREE.Vector3(n.x, n.y, 0));
+        const curvePts = aShape.nodes.map(n => new THREE.Vector3(n.x, n.y, arrowZ));
         if (curvePts.length >= 2) {
           const curve = new THREE.CatmullRomCurve3(curvePts);
           const shaftGeom = new THREE.TubeGeometry(curve, 20, shaftRadius, 6, false);
@@ -2587,28 +2641,30 @@ export default function KoreanBow3D() {
         const tipGeom = new THREE.ConeGeometry(0.006, 0.04, 6);
         const tipMat = new THREE.MeshPhysicalMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
         const tip = new THREE.Mesh(tipGeom, tipMat);
-        tip.position.set(tipNode.x + Math.cos(tipAngle) * 0.02, tipNode.y + Math.sin(tipAngle) * 0.02, 0);
+        tip.position.set(tipNode.x + Math.cos(tipAngle) * 0.02, tipNode.y + Math.sin(tipAngle) * 0.02, arrowZ);
         tip.rotation.z = tipAngle - Math.PI / 2;
         arrowGroup.add(tip);
 
         // 깃 (nock 끝, 반대 방향)
+        // 빨간 깃(cock feather, fi=0)은 활 반대쪽(+y, 위쪽)을 향함
         const nockNode = aShape.nodes[0];
         const postNockNode = aShape.nodes[1];
         const nockDx = postNockNode.x - nockNode.x;
         const nockDy = postNockNode.y - nockNode.y;
         const nockAngle = Math.atan2(nockDy, nockDx);
+        // 깃 위치: nock에서 5cm 앞이 깃의 nock측 끝, 깃 길이 4cm → 중심 = 7cm
+        const fletchLen = 0.04, fletchCenter = 0.07;
         for (let fi = 0; fi < 3; fi++) {
-          const angle = (fi / 3) * Math.PI * 2;
-          const fletchGeom = new THREE.PlaneGeometry(0.06, 0.015);
+          const angle = (fi / 3) * Math.PI * 2 + Math.PI / 2;
+          const fletchGeom = new THREE.PlaneGeometry(fletchLen, 0.012);
           const fletchMat = new THREE.MeshPhysicalMaterial({
             color: fi === 0 ? 0xcc2222 : 0xeeeeee,
             side: THREE.DoubleSide, roughness: 0.8
           });
           const fletch = new THREE.Mesh(fletchGeom, fletchMat);
-          // 깃은 nock에서 반대 방향으로 약간 뒤
-          const fletchX = nockNode.x - Math.cos(nockAngle) * 0.05;
-          const fletchY = nockNode.y - Math.sin(nockAngle) * 0.05;
-          fletch.position.set(fletchX, fletchY + Math.sin(angle) * 0.008, Math.cos(angle) * 0.008);
+          const fletchX = nockNode.x + Math.cos(nockAngle) * fletchCenter;
+          const fletchY = nockNode.y + Math.sin(nockAngle) * fletchCenter;
+          fletch.position.set(fletchX, fletchY + Math.sin(angle) * 0.008, arrowZ + Math.cos(angle) * 0.008);
           fletch.rotation.x = angle;
           arrowGroup.add(fletch);
         }
@@ -2635,25 +2691,7 @@ export default function KoreanBow3D() {
       gripMarker.position.set(0, bowGeom.gripReaction.reactionPointY, 0);
       scene.add(gripMarker);
     }
-    // 당김 중일 때만 nockingPoint / pullPoint 마커 표시
-    if (bowGeom && draw > 0.01) {
-      if (bowGeom.nockingPoint) {
-        const nockMarker = new THREE.Mesh(
-          new THREE.SphereGeometry(0.006, 8, 8),
-          new THREE.MeshBasicMaterial({ color: 0xff3333 })
-        );
-        nockMarker.position.set(bowGeom.nockingPoint.x, bowGeom.nockingPoint.y, 0);
-        scene.add(nockMarker);
-      }
-      if (bowGeom.pullPoint) {
-        const pullMarker = new THREE.Mesh(
-          new THREE.SphereGeometry(0.006, 8, 8),
-          new THREE.MeshBasicMaterial({ color: 0xffcc00 })
-        );
-        pullMarker.position.set(bowGeom.pullPoint.x, bowGeom.pullPoint.y, 0);
-        scene.add(pullMarker);
-      }
-    }
+    // nockingPoint / pullPoint 마커 — 비활성화 (시각적 혼란 방지)
 
     if (gridRef.current) gridRef.current.visible = showGrid;
 
@@ -2887,10 +2925,11 @@ export default function KoreanBow3D() {
 
   useEffect(() => {
     updateBowMesh(drawAmount);
-  }, [drawAmount, params, showString, showArrow, showGrid, updateBowMesh]);
+  }, [drawAmount, params, showString, showArrow, showGrid, jogMode, updateBowMesh]);
 
   // ── 조그셔틀: lumped-mass 시뮬레이션 결과 기반 프레임 렌더 ──
   const lumpedArrowRef = useRef(null); // lumped-mass 화살 전용 메시 그룹
+  const jogStringRef = useRef(null); // 조그셔틀 시위 오버라이드 라인
 
   // lumped-mass 화살을 polyline TubeGeometry로 렌더하는 헬퍼
   const renderLumpedArrow = useCallback((nodes, shaftRadius) => {
@@ -2924,19 +2963,20 @@ export default function KoreanBow3D() {
     tip.rotation.z = tipAngle - Math.PI / 2;
     ag.add(tip);
 
-    // 깃 (nock 쪽)
+    // 깃: nock에서 5cm 앞이 nock측 끝, 길이 4cm, 중심 = 7cm
     const nockNode = nodes[0], postNock = nodes[1];
     const nockAng = Math.atan2(postNock.y - nockNode.y, postNock.x - nockNode.x);
+    const fletchLen2 = 0.04, fletchCenter2 = 0.07;
     for (let fi = 0; fi < 3; fi++) {
-      const a = (fi / 3) * Math.PI * 2;
-      const fg = new THREE.PlaneGeometry(0.06, 0.015);
+      const a = (fi / 3) * Math.PI * 2 + Math.PI / 2;
+      const fg = new THREE.PlaneGeometry(fletchLen2, 0.012);
       const fm = new THREE.MeshPhysicalMaterial({
         color: fi === 0 ? 0xcc2222 : 0xeeeeee, side: THREE.DoubleSide, roughness: 0.8
       });
       const f = new THREE.Mesh(fg, fm);
       f.position.set(
-        nockNode.x - Math.cos(nockAng) * 0.05,
-        nockNode.y - Math.sin(nockAng) * 0.05 + Math.sin(a) * 0.008,
+        nockNode.x + Math.cos(nockAng) * fletchCenter2,
+        nockNode.y + Math.sin(nockAng) * fletchCenter2 + Math.sin(a) * 0.008,
         Math.cos(a) * 0.008
       );
       f.rotation.x = a;
@@ -2972,7 +3012,35 @@ export default function KoreanBow3D() {
 
       // 활 진동 없음 (시위 연결 중)
       if (bowGroupRef.current) bowGroupRef.current.position.x = 0;
-      if (stringMeshRef.current) stringMeshRef.current.position.x = 0;
+
+      // React 시위 숨기고 프레임 기반 시위로 대체
+      if (stringMeshRef.current) stringMeshRef.current.visible = false;
+
+      // 이전 조그 시위 제거
+      if (jogStringRef.current && sceneRef.current) {
+        jogStringRef.current.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) c.material.dispose(); });
+        sceneRef.current.remove(jogStringRef.current);
+        jogStringRef.current = null;
+      }
+
+      // 프레임의 anchor + nockPos로 시위 직접 렌더
+      if (frame.anchorTop && frame.anchorBot && frame.nockPos && sceneRef.current) {
+        const nk = frame.nockPos;
+        const aT = frame.anchorTop;
+        const aB = frame.anchorBot;
+        const pts = [
+          new THREE.Vector3(aB.x, aB.y, 0),
+          new THREE.Vector3(nk.x, nk.y, 0),
+          new THREE.Vector3(aT.x, aT.y, 0),
+        ];
+        const curve = new THREE.CatmullRomCurve3(pts);
+        const strR = (params.stringDiameter || 0.002) * 0.5;
+        const geo = new THREE.TubeGeometry(curve, 12, strR, 4, false);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xe8d8b8 });
+        const mesh = new THREE.Mesh(geo, mat);
+        sceneRef.current.add(mesh);
+        jogStringRef.current = mesh;
+      }
 
       // lumped-mass 화살 렌더
       renderLumpedArrow(frame.nodes, shaftR);
@@ -2982,6 +3050,14 @@ export default function KoreanBow3D() {
       // ── Phase 2: 모달 중첩 자유 비행 ──
       setDrawAmount(0);
       isArrowFlyingRef.current = true;
+
+      // 조그 시위 제거, React 시위 복원
+      if (jogStringRef.current && sceneRef.current) {
+        jogStringRef.current.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) c.material.dispose(); });
+        sceneRef.current.remove(jogStringRef.current);
+        jogStringRef.current = null;
+      }
+      if (stringMeshRef.current) stringMeshRef.current.visible = true;
 
       const t_post = (jogTime - t_sep) / 1000; // 초
       const { omega0, omega_d, zeta, A_grip } = p2.bowVibParams;
@@ -3004,7 +3080,12 @@ export default function KoreanBow3D() {
     jogDataRef.current = null;
     isArrowFlyingRef.current = false;
     if (bowGroupRef.current) bowGroupRef.current.position.x = 0;
-    if (stringMeshRef.current) stringMeshRef.current.position.x = 0;
+    if (stringMeshRef.current) { stringMeshRef.current.position.x = 0; stringMeshRef.current.visible = true; }
+    if (jogStringRef.current && sceneRef.current) {
+      jogStringRef.current.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) c.material.dispose(); });
+      sceneRef.current.remove(jogStringRef.current);
+      jogStringRef.current = null;
+    }
     if (flyingArrowRef.current && sceneRef.current) {
       flyingArrowRef.current.traverse(c => {
         if (c.geometry) c.geometry.dispose();
@@ -3099,6 +3180,11 @@ export default function KoreanBow3D() {
             {drawAmount > 0.01 && <div>당김력: <b style={{ color: "#ff9966" }}>{(bowGeomData.F_draw || 0).toFixed(0)} N ({((bowGeomData.F_draw || 0) / 9.81).toFixed(1)} kgf / {((bowGeomData.F_draw || 0) / 4.44822).toFixed(1)} lbs)</b></div>}
             <div>당김 비율: <b style={{ color: "#88ff88" }}>{(drawAmount * 100).toFixed(0)}%</b></div>
             {launchAngleDeg !== null && <div>초기발사각: <b style={{ color: "#ffaaff" }}>{launchAngleDeg.toFixed(2)}°</b></div>}
+            <div style={{ borderTop: "1px solid #444466", marginTop: 4, paddingTop: 4 }}>
+              <div>저장 에너지: <b style={{ color: "#ffdd88" }}>{energyData.E_stored.toFixed(1)} J</b></div>
+              <div>화살 속도: <b style={{ color: "#88ffcc" }}>{energyData.v_arrow.toFixed(1)} m/s</b></div>
+              <div>화살 에너지: <b style={{ color: "#88ffcc" }}>{energyData.KE_arrow.toFixed(1)} J</b> ({(energyData.eta * 100).toFixed(0)}%)</div>
+            </div>
           </div>
 
           {/* 구조 범례 */}
