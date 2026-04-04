@@ -1556,6 +1556,10 @@ function interpolateBowByQ(samples, q) {
     T_current: lerp(s0.T_current, s1.T_current),
     nockX: lerp(s0.nockX, s1.nockX),
     nockY: lerp(s0.nockY, s1.nockY),
+    nockingPoint: {
+      x: lerp(s0.nockingPoint.x, s1.nockingPoint.x),
+      y: lerp(s0.nockingPoint.y, s1.nockingPoint.y),
+    },
     drawAmount: lerp(s0.drawAmount, s1.drawAmount),
     restPoint: s0.restPoint,
     q,
@@ -2249,10 +2253,9 @@ function simulateRelease(params) {
       const arrowNock3d = { x: arrowState.x[0], y: arrowState.y[0], z: arrowState.z[0] };
       stepStringChain(stringState, anchorTop3d, anchorBot3d, arrowNock3d, dt);
 
-      // ── C. nock 위치: 정적 솔버 보간값 직접 사용 ──
-      // computeNockFromStringConstraint(원-원 교점)의 기하학적 비선형 우회
-      // q→nockX 매핑이 정적 솔버에서 보장되므로 에너지 전달 정확
-      const nockTarget = { x: limbState.nockX, y: limbState.nockY || 0 };
+      // ── C. nock 위치: 정적 솔버의 nockingPoint 보간값 직접 사용 ──
+      // nockingPoint = (nockX, nockY + nockingOffset) — 화살 오니 위치
+      const nockTarget = limbState.nockingPoint;
       const dxT = anchorTop.x - nockTarget.x, dyT = anchorTop.y - nockTarget.y;
       const dxB = anchorBot.x - nockTarget.x, dyB = anchorBot.y - nockTarget.y;
       const distT = Math.sqrt(dxT*dxT + dyT*dyT) || 1e-6;
