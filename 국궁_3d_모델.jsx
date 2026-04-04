@@ -1586,14 +1586,164 @@ function computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower)
   }
 }
 
-// Lumped-mass 화살 초기화 (만작 상태)
-function initLumpedMassArrow(arrowProps, nockPos, restPos) {
+// ─── 시위 유질량 체인 초기화 (24노드 3D) ───
+function initStringChain(params, anchorTop, anchorBot, nockPos, L_upper, L_lower) {
+  const N_str = 24;
+  const stringLen = params.stringLength || 1.08;
+  const ds_str = stringLen / (N_str - 1);
+  const m_string = params.stringMass || 0.005; // 5g
+
+  // z-축: 앵커 = 활 중심면(z=0), 화살 = z_arrow
+  const z_arrow = (params.limbWidth || 0.028) / 2 + 0.003;
+
+  // nockNode 인덱스: 상현 길이 비율
+  const nockNode = Math.max(1, Math.min(N_str - 2, Math.round(L_upper / ds_str)));
+
+  const sx = new Float64Array(N_str);
+  const sy = new Float64Array(N_str);
+  const sz = new Float64Array(N_str);
+  const svx = new Float64Array(N_str);
+  const svy = new Float64Array(N_str);
+  const svz = new Float64Array(N_str);
+  const sm = new Float64Array(N_str);
+
+  // 질량 균등 분배
+  const m_node = m_string / N_str;
+  for (let i = 0; i < N_str; i++) sm[i] = m_node;
+
+  // 상현: node 0(anchorTop) → nockNode
+  for (let i = 0; i <= nockNode; i++) {
+    const frac = i / nockNode;
+    sx[i] = anchorTop.x + (nockPos.x - anchorTop.x) * frac;
+    sy[i] = anchorTop.y + (nockPos.y - anchorTop.y) * frac;
+    sz[i] = 0 + z_arrow * frac; // 앵커 z=0 → nock z=z_arrow
+  }
+
+  // 하현: nockNode → node N-1(anchorBot)
+  for (let i = nockNode + 1; i < N_str; i++) {
+    const frac = (i - nockNode) / (N_str - 1 - nockNode);
+    sx[i] = nockPos.x + (anchorBot.x - nockPos.x) * frac;
+    sy[i] = nockPos.y + (anchorBot.y - nockPos.y) * frac;
+    sz[i] = z_arrow + (0 - z_arrow) * frac; // nock z=z_arrow → 앵커 z=0
+  }
+
+  return {
+    N: N_str, ds: ds_str, sx, sy, sz, svx, svy, svz, sm,
+    nockNode, z_arrow,
+    nockPinned: true, // 화살 연결 상태
+  };
+}
+
+// 시위 체인 SHAKE (3D, 앵커+nock 핀 가능, pinned = boolean array)
+function shakeStringChain(state, pinned) {
+  const { N, ds, sx, sy, sz, sm } = state;
+  const iterations = 10; // 시위는 굽힘 없으므로 10회면 충분
+  for (let iter = 0; iter < iterations; iter++) {
+    for (let i = 0; i < N - 1; i++) {
+      const dx = sx[i + 1] - sx[i];
+      const dy = sy[i + 1] - sy[i];
+      const dz = sz[i + 1] - sz[i];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 1e-12) continue;
+      const err = dist - ds;
+      const correction = err / dist * 0.5;
+
+      const iP = pinned[i], jP = pinned[i + 1];
+      if (iP && jP) continue;
+
+      if (iP) {
+        sx[i + 1] -= correction * dx;
+        sy[i + 1] -= correction * dy;
+        sz[i + 1] -= correction * dz;
+      } else if (jP) {
+        sx[i] += correction * dx;
+        sy[i] += correction * dy;
+        sz[i] += correction * dz;
+      } else {
+        // 균등 질량이므로 0.5/0.5
+        sx[i] += correction * 0.5 * dx;
+        sy[i] += correction * 0.5 * dy;
+        sz[i] += correction * 0.5 * dz;
+        sx[i + 1] -= correction * 0.5 * dx;
+        sy[i + 1] -= correction * 0.5 * dy;
+        sz[i + 1] -= correction * 0.5 * dz;
+      }
+    }
+  }
+}
+
+// 시위 체인 1스텝 적분 (Störmer-Verlet + SHAKE)
+// 사전 할당: _sx_old 등은 initStringChain에서 생성
+function stepStringChain(state, anchorTop3d, anchorBot3d, arrowNock3d, dt) {
+  const { N, sx, sy, sz, svx, svy, svz, nockNode, nockPinned } = state;
+  const g = 9.81;
+
+  // 이전 위치 저장 (사전 할당 배열 사용)
+  if (!state._sx_old) {
+    state._sx_old = new Float64Array(N);
+    state._sy_old = new Float64Array(N);
+    state._sz_old = new Float64Array(N);
+    state._pinned = new Uint8Array(N);
+  }
+  const sx_old = state._sx_old, sy_old = state._sy_old, sz_old = state._sz_old;
+  for (let i = 0; i < N; i++) { sx_old[i] = sx[i]; sy_old[i] = sy[i]; sz_old[i] = sz[i]; }
+
+  // pinned 배열 구성 (Set 대신)
+  const pinned = state._pinned;
+  pinned.fill(0);
+  pinned[0] = 1; pinned[N - 1] = 1;
+  if (nockPinned) pinned[nockNode] = 1;
+
+  // 앵커 핀
+  sx[0] = anchorTop3d.x; sy[0] = anchorTop3d.y; sz[0] = anchorTop3d.z;
+  sx[N - 1] = anchorBot3d.x; sy[N - 1] = anchorBot3d.y; sz[N - 1] = anchorBot3d.z;
+
+  // nock 핀 (화살 연결 시)
+  if (nockPinned && arrowNock3d) {
+    sx[nockNode] = arrowNock3d.x;
+    sy[nockNode] = arrowNock3d.y;
+    sz[nockNode] = arrowNock3d.z;
+  }
+
+  // Verlet 위치 업데이트 (내부 노드만)
+  const damping = 0.005; // 시위 감쇠 (다크론/다이니마 저감쇠)
+  for (let i = 1; i < N - 1; i++) {
+    if (pinned[i]) continue;
+    sx[i] += svx[i] * dt + 0.5 * (-damping * svx[i]) * dt * dt;
+    sy[i] += svy[i] * dt + 0.5 * (-g - damping * svy[i]) * dt * dt;
+    sz[i] += svz[i] * dt + 0.5 * (-damping * svz[i]) * dt * dt;
+  }
+
+  // SHAKE
+  shakeStringChain(state, pinned);
+
+  // 핀 노드 재고정
+  sx[0] = anchorTop3d.x; sy[0] = anchorTop3d.y; sz[0] = anchorTop3d.z;
+  sx[N - 1] = anchorBot3d.x; sy[N - 1] = anchorBot3d.y; sz[N - 1] = anchorBot3d.z;
+  if (nockPinned && arrowNock3d) {
+    sx[nockNode] = arrowNock3d.x;
+    sy[nockNode] = arrowNock3d.y;
+    sz[nockNode] = arrowNock3d.z;
+  }
+
+  // 속도 재계산
+  for (let i = 0; i < N; i++) {
+    svx[i] = (sx[i] - sx_old[i]) / dt;
+    svy[i] = (sy[i] - sy_old[i]) / dt;
+    svz[i] = (sz[i] - sz_old[i]) / dt;
+  }
+}
+
+// Lumped-mass 화살 초기화 (만작 상태, 3D)
+function initLumpedMassArrow(arrowProps, nockPos, restPos, z_arrow) {
   const N = 12;
   const ds = arrowProps.L / (N - 1);
   const x = new Float64Array(N);
   const y = new Float64Array(N);
+  const z = new Float64Array(N);
   const vx = new Float64Array(N);
   const vy = new Float64Array(N);
+  const vz = new Float64Array(N);
   const m = new Float64Array(N);
 
   // 화살 방향: nock에서 과녁(-x) 방향
@@ -1604,9 +1754,11 @@ function initLumpedMassArrow(arrowProps, nockPos, restPos) {
   const uy = dy / Math.max(dist, 1e-6);
 
   // 노드 배치: nock(0) → tip(N-1)
+  const zArrow = z_arrow || 0;
   for (let i = 0; i < N; i++) {
     x[i] = nockPos.x + ux * ds * i;
     y[i] = nockPos.y + uy * ds * i;
+    z[i] = zArrow; // 화살 전체가 z_arrow 위치
   }
 
   // 질량 분배
@@ -1624,7 +1776,7 @@ function initLumpedMassArrow(arrowProps, nockPos, restPos) {
   }
 
   return {
-    N, ds, x, y, vx, vy, m,
+    N, ds, x, y, z, vx, vy, vz, m,
     EI: arrowProps.EI,
     restNodeIdx,
     onString: true,
@@ -1692,11 +1844,35 @@ function computeBendingForces(state) {
   return { fx, fy };
 }
 
-// SHAKE 거리 구속 (비신장 조건 유지)
+// z-축 굽힘력 (소각도 유한차분, archer's paradox)
+// 화살 z-변위가 작으므로 (< 8mm) 소각도 근사 정확
+function computeBendingForcesZ(state) {
+  const { N, z, EI, ds } = state;
+  const fz = new Float64Array(N);
+  // 유한차분 4차 미분: F = -EI × d⁴z/dx⁴ → 3노드 스텐실
+  // E_bend = Σ EI/(2ds) × κ², κ = (z[i-1] - 2z[i] + z[i+1])/ds²
+  // dE/dz[i-1] = EI×κ/(ds×ds²) = EI×κ/ds³
+  for (let i = 1; i < N - 1; i++) {
+    const kappa = (z[i - 1] - 2 * z[i] + z[i + 1]) / (ds * ds);
+    // 곡률 제한 (y-축과 동일)
+    const MAX_KAPPA = 0.25 / ds; // ~14.3°/ds
+    const kappaClamped = Math.max(-MAX_KAPPA, Math.min(MAX_KAPPA, kappa));
+    const coeff = EI * kappaClamped / ds;
+    fz[i - 1] += -coeff;
+    fz[i]     +=  2 * coeff;
+    fz[i + 1] += -coeff;
+  }
+  return { fz };
+}
+
+// SHAKE 거리 구속
+// on-string(pinnedNode=0): x,y만 2D SHAKE (z는 소변위이므로 분리 처리)
+// 자유비행: 완전 3D SHAKE
 function enforceDistanceConstraints(state, iterations = 4, pinnedNode = -1) {
-  const { N, ds, x, y, m } = state;
+  const { N, ds, x, y, z, m } = state;
   if (pinnedNode === 0) {
-    // 선형 체인 + nock 고정: 순방향 직접 풀이 (O(N), 정확)
+    // 선형 체인 + nock 고정: x,y 2D 순방향 직접 풀이
+    // z는 소변위(< 20mm / 74mm seg = 3%)이므로 x,y 거리에 미치는 영향 무시
     for (let i = 0; i < N - 1; i++) {
       const dx = x[i + 1] - x[i];
       const dy = y[i + 1] - y[i];
@@ -1707,12 +1883,13 @@ function enforceDistanceConstraints(state, iterations = 4, pinnedNode = -1) {
       y[i + 1] = y[i] + dy * scale;
     }
   } else {
-    // 일반 SHAKE (분리 후 자유 비행)
+    // 일반 SHAKE (분리 후 자유 비행): 3D
     for (let iter = 0; iter < iterations; iter++) {
       for (let i = 0; i < N - 1; i++) {
         const dx = x[i + 1] - x[i];
         const dy = y[i + 1] - y[i];
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const dz = z ? (z[i + 1] - z[i]) : 0;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dist < 1e-12) continue;
         const err = dist - ds;
         const correction = err / dist * 0.5;
@@ -1724,6 +1901,10 @@ function enforceDistanceConstraints(state, iterations = 4, pinnedNode = -1) {
         y[i] += correction * (wi / sumW) * dy;
         x[i + 1] -= correction * (wj / sumW) * dx;
         y[i + 1] -= correction * (wj / sumW) * dy;
+        if (z) {
+          z[i] += correction * (wi / sumW) * dz;
+          z[i + 1] -= correction * (wj / sumW) * dz;
+        }
       }
     }
   }
@@ -1803,21 +1984,25 @@ function computeRestContactForce(state, restPos, k_rest = 5e3) {
 
 // Störmer-Verlet 1스텝 (자유 비행 전용 — on-string은 simulateRelease가 직접 처리)
 function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
-  const { N, x, y, vx, vy, m } = state;
+  const { N, x, y, z, vx, vy, vz, m } = state;
   const g_accel = 9.81;
 
   const x_old = Float64Array.from(x);
   const y_old = Float64Array.from(y);
+  const z_old = Float64Array.from(z);
 
   // 힘 계산: bending + gravity + rest (시위력 없음 — 이미 분리됨)
   const bend = computeBendingForces(state);
+  const bendZ = computeBendingForcesZ(state);
   const restF = computeRestContactForce(state, restPos);
 
   const ax = new Float64Array(N);
   const ay = new Float64Array(N);
+  const az = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     ax[i] = bend.fx[i] / m[i];
     ay[i] = (bend.fy[i] - m[i] * g_accel) / m[i];
+    az[i] = bendZ.fz[i] / m[i]; // z: 중력 없음
   }
   if (restF.Fy !== 0) {
     ay[restF.nodeIndex] += restF.Fy / m[restF.nodeIndex];
@@ -1826,6 +2011,7 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
   for (let i = 0; i < N; i++) {
     x[i] += vx[i] * dt + 0.5 * ax[i] * dt * dt;
     y[i] += vy[i] * dt + 0.5 * ay[i] * dt * dt;
+    z[i] += vz[i] * dt + 0.5 * az[i] * dt * dt;
   }
 
   enforceDistanceConstraints(state, 30);
@@ -1834,16 +2020,18 @@ function stepLumpedMass(state, bowState, restPos, dt, drawAmount) {
   for (let i = 0; i < N; i++) {
     vx[i] = (x[i] - x_old[i]) / dt;
     vy[i] = (y[i] - y_old[i]) / dt;
+    vz[i] = (z[i] - z_old[i]) / dt;
   }
 
-  // 6) 고주파 감쇠: 인접 노드 속도 차이를 줄여 지그재그 방지
-  // Laplacian smoothing of velocity (약한 수치 점성)
-  const alpha = 0.05; // 감쇠 계수 (0=없음, 0.1=강함)
+  // 6) 고주파 감쇠: Laplacian smoothing of velocity
+  const alpha = 0.05;
   for (let i = 1; i < N - 1; i++) {
     const avgVx = (vx[i - 1] + vx[i + 1]) / 2;
     const avgVy = (vy[i - 1] + vy[i + 1]) / 2;
+    const avgVz = (vz[i - 1] + vz[i + 1]) / 2;
     vx[i] += alpha * (avgVx - vx[i]);
     vy[i] += alpha * (avgVy - vy[i]);
+    vz[i] += alpha * (avgVz - vz[i]);
   }
 }
 
@@ -1892,108 +2080,129 @@ function computeFreeFreeModeshapes(arrowProps, N_nodes) {
 
 // lumped mass 상태 → 모달 진폭 투영
 function computeModalAmplitudes(state, arrowProps, modes) {
-  const { N, x, y, vx, vy, m } = state;
+  const { N, x, y, z, vx, vy, vz, m } = state;
   const M_total = arrowProps.m_total;
 
-  // 무게중심
-  let cmx = 0, cmy = 0, cmvx = 0, cmvy = 0;
+  // 무게중심 (3D)
+  let cmx = 0, cmy = 0, cmz = 0, cmvx = 0, cmvy = 0, cmvz = 0;
   for (let i = 0; i < N; i++) {
-    cmx += m[i] * x[i]; cmy += m[i] * y[i];
-    cmvx += m[i] * vx[i]; cmvy += m[i] * vy[i];
+    cmx += m[i] * x[i]; cmy += m[i] * y[i]; cmz += m[i] * z[i];
+    cmvx += m[i] * vx[i]; cmvy += m[i] * vy[i]; cmvz += m[i] * vz[i];
   }
-  cmx /= M_total; cmy /= M_total;
-  cmvx /= M_total; cmvy /= M_total;
+  cmx /= M_total; cmy /= M_total; cmz /= M_total;
+  cmvx /= M_total; cmvy /= M_total; cmvz /= M_total;
 
-  // 화살 축 방향 (node 0 → node N-1)
+  // 화살 축 방향 (node 0 → node N-1, x-y 면)
   const adx = x[N - 1] - x[0], ady = y[N - 1] - y[0];
   const aLen = Math.sqrt(adx * adx + ady * ady) || 1;
-  const ex = adx / aLen, ey = ady / aLen; // 축 단위벡터
-  const nx = -ey, ny = ex; // 법선 (횡방향)
+  const ex = adx / aLen, ey = ady / aLen;
+  const nx = -ey, ny = ex; // y-축 법선
 
-  // 축 방향 회전각
   const axisAngle = Math.atan2(ey, ex);
 
-  // 각 노드의 횡방향 변위 (CoM 기준)
+  // y-축 횡방향 변위 (x-y 면내)
   const u = new Float64Array(N);
   const udot = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     const rx = x[i] - cmx, ry = y[i] - cmy;
-    u[i] = rx * nx + ry * ny; // 법선 방향 변위
+    u[i] = rx * nx + ry * ny;
     udot[i] = (vx[i] - cmvx) * nx + (vy[i] - cmvy) * ny;
   }
 
-  // 모달 투영
+  // z-축 횡방향 변위 (화살 축이 x-y 면에 있으므로 z 자체가 횡변위)
+  const uz = new Float64Array(N);
+  const uzdot = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    uz[i] = z[i] - cmz;
+    uzdot[i] = vz[i] - cmvz;
+  }
+
+  // y-축 모달 투영
   const modalAmps = [];
   for (let k = 0; k < modes.length; k++) {
     const phi = modes[k].phi;
     const omega = modes[k].omega;
-
-    // 모달 질량 Mk = Σ mi × φi²
     let Mk = 0, qk = 0, qdotk = 0;
     for (let i = 0; i < N; i++) {
       Mk += m[i] * phi[i] * phi[i];
       qk += m[i] * u[i] * phi[i];
       qdotk += m[i] * udot[i] * phi[i];
     }
-    qk /= Mk;
-    qdotk /= Mk;
-
-    // 진폭과 위상: q(t) = A × sin(ωt + φ₀)
+    qk /= Mk; qdotk /= Mk;
     const A = Math.sqrt(qk * qk + (qdotk / omega) * (qdotk / omega));
     const phase = Math.atan2(qk, qdotk / omega);
-
     modalAmps.push({ A, phase, omega, damping: modes[k].damping });
   }
 
+  // z-축 모달 투영 (동일 mode shapes — 원형 단면)
+  const modalAmpsZ = [];
+  for (let k = 0; k < modes.length; k++) {
+    const phi = modes[k].phi;
+    const omega = modes[k].omega;
+    let Mk = 0, qk = 0, qdotk = 0;
+    for (let i = 0; i < N; i++) {
+      Mk += m[i] * phi[i] * phi[i];
+      qk += m[i] * uz[i] * phi[i];
+      qdotk += m[i] * uzdot[i] * phi[i];
+    }
+    qk /= Mk; qdotk /= Mk;
+    const A = Math.sqrt(qk * qk + (qdotk / omega) * (qdotk / omega));
+    const phase = Math.atan2(qk, qdotk / omega);
+    modalAmpsZ.push({ A, phase, omega, damping: modes[k].damping });
+  }
+
   return {
-    CoM: { x: cmx, y: cmy, vx: cmvx, vy: cmvy },
+    CoM: { x: cmx, y: cmy, z: cmz, vx: cmvx, vy: cmvy, vz: cmvz },
     axisAngle,
     modalAmps,
+    modalAmpsZ,
   };
 }
 
 // 마스터 시뮬레이션 함수: 전체 발시 과정 사전 계산
-// 결합 동역학 시뮬레이션: 활채 ODE + 시위 구속 + 화살 lumped-mass
+// 결합 동역학: 활채 1-DOF ODE + 시위 24노드 체인(SHAKE) + 화살 12노드 3D lumped-mass
 function simulateRelease(params) {
   const dt = 0.00001;        // 10μs = 0.01ms
   const T_MAX = 0.030;       // 30ms
   const storeInterval = 10;  // 매 10스텝 (0.1ms) 마다 저장
 
-  // 1) 사전 샘플링 (q, F_draw, 앵커, 시위 길이 테이블)
-  const samples = preSampleBowAnchors(params, 31); // 더 촘촘하게
+  // 1) 사전 샘플링
+  const samples = preSampleBowAnchors(params, 31);
   const arrowProps = computeArrowProperties(params);
 
-  // 2) 활채 유효질량 (Klopsteg 가상질량)
-  const m_limb_each = 0.050; // kg (FRP 활채)
-  const m_siyah_each = 0.010; // kg (고자)
-  const m_string = 0.005; // kg (시위)
+  // 2) 활채 유효질량 (Klopsteg)
+  const m_limb_each = 0.050;
+  const m_siyah_each = 0.010;
+  const m_string = params.stringMass || 0.005;
+  // 시위 체인은 앵커+nock에 핀되어 있으므로 자유도가 제한적 → Klopsteg 유효질량에 포함 유지
   const m_eff_limb = 2 * (0.20 * m_limb_each + m_siyah_each) + m_string / 3;
   const zeta_limb = params.dampingRatio || 0.02;
 
   // 3) 만작 상태 초기화
   const fullDraw = samples[samples.length - 1];
-  const brace = samples[0];
-  // 발시 후 시위 꺾임점 = nockingPoint (오니 위치)
-  // 당길 때는 엄지(pullPoint)에서 꺾이지만, 발시 후 엄지가 놓이면
-  // 시위에 작용하는 유일한 외력은 화살 nock → 시위는 nockingPoint에서 꺾임
   const nockPos = fullDraw.nockingPoint;
   const restPos = fullDraw.restPoint;
-  const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos);
 
-  // 시위 상현/하현 고정 길이 — nockingPoint 기준 (발시 후 시위 구속점)
+  // z-축: 화살 위치
+  const z_arrow = (params.limbWidth || 0.028) / 2 + 0.003;
+
+  // 시위 상현/하현 길이 (체인 초기화용)
   const _dxT = fullDraw.anchorTop.x - nockPos.x, _dyT = fullDraw.anchorTop.y - nockPos.y;
   const _dxB = fullDraw.anchorBot.x - nockPos.x, _dyB = fullDraw.anchorBot.y - nockPos.y;
   const L_upper = Math.sqrt(_dxT * _dxT + _dyT * _dyT);
   const L_lower = Math.sqrt(_dxB * _dxB + _dyB * _dyB);
 
-  // 활채 상태: q = nockX - nockX_brace, q_dot = 0
-  let q = fullDraw.q;      // 만작 변위
-  let q_dot = 0;            // 초기 정지
+  // 화살 초기화 (3D)
+  const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos, z_arrow);
 
-  // 활채 강성 (F_draw-q 테이블에서 국소 구배)
+  // 시위 체인 초기화 (24노드 3D)
+  const stringState = initStringChain(params, fullDraw.anchorTop, fullDraw.anchorBot, nockPos, L_upper, L_lower);
+
+  // 활채 상태
+  let q = fullDraw.q;
+  let q_dot = 0;
+
   const vibParams = computeVibrationParams(params);
-
-  // 모드형상 사전 계산
   const modes = computeFreeFreeModeshapes(arrowProps, arrowState.N);
   const nockClipF = params.nockClipForce || 3.0;
 
@@ -2003,8 +2212,6 @@ function simulateRelease(params) {
   let phase2Data = null;
   const totalSteps = Math.ceil(T_MAX / dt);
 
-  let lastNockTarget = { x: nockPos.x, y: nockPos.y }; // 시위 꺾임점 추적 (= nockingPoint)
-
   for (let step = 0; step <= totalSteps; step++) {
     const t = step * dt;
 
@@ -2013,55 +2220,72 @@ function simulateRelease(params) {
     const anchorTop = limbState.anchorTop;
     const anchorBot = limbState.anchorBot;
 
+    // 3D 앵커 (시위 앵커 = 활 중심면 z=0)
+    const anchorTop3d = { x: anchorTop.x, y: anchorTop.y, z: 0 };
+    const anchorBot3d = { x: anchorBot.x, y: anchorBot.y, z: 0 };
+
     if (arrowState.onString) {
-      // ── B. 시위 구속: 원-원 교점으로 시위 꺾임점 계산 ──
+      // ── B. 시위 체인 적분 ──
+      // 화살 nock 위치로 시위 nockNode 핀
+      const arrowNock3d = { x: arrowState.x[0], y: arrowState.y[0], z: arrowState.z[0] };
+      stepStringChain(stringState, anchorTop3d, anchorBot3d, arrowNock3d, dt);
+
+      // ── C. 시위 힘 방향 ──
+      // x,y: 기존 방식 — 앵커(활채 끝)→nockTarget 방향 (Klopsteg 에너지 전달 보존)
       const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
-      lastNockTarget = { x: nockTarget.x, y: nockTarget.y };
-
-      // ── C. 시위 장력 T 계산 (nock을 필요 위치로 이동시키는 구속력) ──
-      // nock의 현재 위치와 필요 위치의 차이 → 구속력
-      const nock_x = arrowState.x[0], nock_y = arrowState.y[0];
-      const dx_corr = nockTarget.x - nock_x;
-      const dy_corr = nockTarget.y - nock_y;
-
-      // 시위 방향 벡터 (nock → 각 앵커)
       const dxT = anchorTop.x - nockTarget.x, dyT = anchorTop.y - nockTarget.y;
       const dxB = anchorBot.x - nockTarget.x, dyB = anchorBot.y - nockTarget.y;
-      const distT = Math.sqrt(dxT * dxT + dyT * dyT) || 1e-6;
-      const distB = Math.sqrt(dxB * dxB + dyB * dyB) || 1e-6;
-      const eT = { x: dxT / distT, y: dyT / distT };
-      const eB = { x: dxB / distB, y: dyB / distB };
+      const distT = Math.sqrt(dxT*dxT + dyT*dyT) || 1e-6;
+      const distB = Math.sqrt(dxB*dxB + dyB*dyB) || 1e-6;
+      const e_sum_x = dxT/distT + dxB/distB;
+      const e_sum_y = dyT/distT + dyB/distB;
+      const e_sum_len = Math.sqrt(e_sum_x*e_sum_x + e_sum_y*e_sum_y) || 1e-6;
 
-      // 시위 합력 방향
-      const e_sum_x = eT.x + eB.x;
-      const e_sum_y = eT.y + eB.y;
+      // z: 체인 nockNode 양옆 노드에서 추출 (3D 기하 반영)
+      const ni = stringState.nockNode;
+      const dzT_chain = stringState.sz[ni - 1] - stringState.sz[ni];
+      const dzB_chain = stringState.sz[ni + 1] - stringState.sz[ni];
+      const dsT_chain = Math.sqrt(
+        (stringState.sx[ni-1]-stringState.sx[ni])**2 +
+        (stringState.sy[ni-1]-stringState.sy[ni])**2 +
+        dzT_chain*dzT_chain) || 1e-6;
+      const dsB_chain = Math.sqrt(
+        (stringState.sx[ni+1]-stringState.sx[ni])**2 +
+        (stringState.sy[ni+1]-stringState.sy[ni])**2 +
+        dzB_chain*dzB_chain) || 1e-6;
+      const e_sum_z = dzT_chain/dsT_chain + dzB_chain/dsB_chain;
 
-      // ── D. 동적 T 계산 (분리 판정용) ──
-      // Klopsteg 결합 모델: 화살이 받는 힘 = F_restore × m_arrow / m_coupled
+      // ── D. 동적 T 계산 (Klopsteg) ──
       const F_restore_sep = limbState.F_draw;
       const m_coupled_sep = m_eff_limb + arrowProps.m_total;
       const T_dynamic = Math.abs(F_restore_sep) * arrowProps.m_total / m_coupled_sep;
-      const e_sum_len = Math.sqrt(e_sum_x * e_sum_x + e_sum_y * e_sum_y) || 1e-6;
+      // x,y: 기존과 동일한 2D 정규화
       const Fx = T_dynamic * e_sum_x / e_sum_len;
       const Fy = T_dynamic * e_sum_y / e_sum_len;
+      // z: 체인 기하에서 추출한 횡력 (에너지 분배와 독립)
+      const Fz = T_dynamic * e_sum_z / e_sum_len;
 
-      // ── E. 활채 ODE: Klopsteg 결합 모델 ──
+      // ── E. 활채 ODE ──
       const F_restore = limbState.F_draw;
       const m_coupled = m_eff_limb + arrowProps.m_total;
       const k_local = Math.abs(F_restore) / Math.max(Math.abs(q), 0.01);
       const q_accel = -F_restore / m_coupled - 2 * zeta_limb * Math.sqrt(k_local / m_coupled) * q_dot;
-
-      // 활채 Verlet
       q += q_dot * dt + 0.5 * q_accel * dt * dt;
       q_dot += q_accel * dt;
       if (q < -0.15) q = -0.15;
 
-      // ── F. 화살 적분: 강체 병진 + 굽힘 섭동 ──
-      const { N, x, y, vx, vy, m } = arrowState;
+      // ── F. 화살 적분: 강체 병진 + 굽힘 섭동 (3D) ──
+      const { N, x, y, z, vx, vy, vz, m } = arrowState;
       const x_old = Float64Array.from(x);
       const y_old = Float64Array.from(y);
+      const z_old = Float64Array.from(z);
 
-      // 1) 강체 병진: nock = nockTarget (nockingPoint 기준이므로 오프셋 불필요)
+      // nockTarget: 시위 체인에서 결정된 nock 위치 (x,y는 체인이 결정)
+      // 현재 구조에서 nock은 체인에 핀되어 있으므로, 체인 SHAKE 결과가 nock x,y를 결정
+      // 여기서는 기존 원-원 교점 대신 limb 보간된 nock 위치를 사용
+      const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
+
+      // 1) x,y 강체 병진
       const dx_rigid = nockTarget.x - x[0];
       const dy_rigid = nockTarget.y - y[0];
       for (let i = 0; i < N; i++) {
@@ -2069,53 +2293,66 @@ function simulateRelease(params) {
         y[i] += dy_rigid;
       }
 
-      // 2) 굽힘 섭동: bending + gravity + rest (강체 위의 미소 변형)
+      // 2) x,y 굽힘 섭동
       const bend = computeBendingForces(arrowState);
       const restF = computeRestContactForce(arrowState, restPos);
       for (let i = 1; i < N; i++) {
         const ax_i = bend.fx[i] / m[i];
         const ay_i = (bend.fy[i] - m[i] * 9.81) / m[i] + (i === restF.nodeIndex && restF.Fy ? restF.Fy / m[i] : 0);
-        x[i] += 0.5 * ax_i * dt * dt;  // 강체 속도는 이미 병진으로 반영됨
+        x[i] += 0.5 * ax_i * dt * dt;
         y[i] += 0.5 * ay_i * dt * dt;
       }
 
-      // 3) SHAKE: 미소 보정만 필요 (강체 병진이 대부분 처리)
+      // 3) z-축 적분: 시위 z-힘 + z-굽힘
+      const bendZ = computeBendingForcesZ(arrowState);
+      // nock (node 0): 시위 z-힘 + z-굽힘력
+      const az_nock = (Fz + bendZ.fz[0]) / m[0];
+      z[0] += vz[0] * dt + 0.5 * az_nock * dt * dt;
+      // 나머지 노드: z-굽힘력만
+      for (let i = 1; i < N; i++) {
+        const az_i = bendZ.fz[i] / m[i];
+        z[i] += vz[i] * dt + 0.5 * az_i * dt * dt;
+      }
+
+      // 4) SHAKE (3D)
       enforceDistanceConstraints(arrowState, 30, 0);
-      // nock 재투영
+      // nock x,y 재투영 (시위 구속)
       arrowState.x[0] = nockTarget.x;
       arrowState.y[0] = nockTarget.y;
-      // 속도
+      // nock z는 자유 (시위 z-힘으로 결정됨, 구속 아님)
+
+      // 5) 속도
       for (let i = 0; i < N; i++) {
         vx[i] = (x[i] - x_old[i]) / dt;
         vy[i] = (y[i] - y_old[i]) / dt;
+        vz[i] = (z[i] - z_old[i]) / dt;
       }
       // 고주파 감쇠
       const alpha = 0.05;
       for (let i = 1; i < N - 1; i++) {
         vx[i] += alpha * ((vx[i-1]+vx[i+1])/2 - vx[i]);
         vy[i] += alpha * ((vy[i-1]+vy[i+1])/2 - vy[i]);
+        vz[i] += alpha * ((vz[i-1]+vz[i+1])/2 - vz[i]);
       }
 
-      // ── G. 분리 판정 ──
-      // Nock 클립은 시위 방향으로는 자유 (축력 전달 가능)
-      // 시위에 수직인 횡력만이 클립을 벌려 분리시킴
-      // 시위 방향 = (e_upper + e_lower)의 평균
-      const string_dir_x = (eT.x + eB.x), string_dir_y = (eT.y + eB.y);
+      // ── G. 분리 판정 (3D) ──
+      const string_dir_x = e_sum_x, string_dir_y = e_sum_y;
       const sdLen = Math.sqrt(string_dir_x*string_dir_x + string_dir_y*string_dir_y) || 1e-6;
-      const sd_nx = -string_dir_y / sdLen, sd_ny = string_dir_x / sdLen; // 시위에 수직
-      // 시위력의 시위-수직 성분 = 실질적 횡력
-      const F_perp = Math.abs(Fx * sd_nx + Fy * sd_ny);
-      if (F_perp > nockClipF && t > 0.003) {
+      const sd_nx = -string_dir_y / sdLen, sd_ny = string_dir_x / sdLen;
+      const F_perp_xy = Math.abs(Fx * sd_nx + Fy * sd_ny);
+      // z-힘도 횡력에 포함
+      // 분리 판정: x-y면 횡력만 사용 (Fz는 화살을 옆으로 밀 뿐 클립을 벌리지 않음)
+      if (F_perp_xy > nockClipF && t > 0.003) {
         arrowState.onString = false;
+        stringState.nockPinned = false; // 시위 nockNode 해제
       }
-      // 활채가 brace에 도달하면 분리
       if (q <= 0.005) {
         arrowState.onString = false;
+        stringState.nockPinned = false;
       }
 
     } else {
-      // ── 분리 후: 화살은 자유 비행, 활채는 자유 진동 ──
-      // 활채 자유 진동 (시위 반력 없음, 복원력만)
+      // ── 분리 후: 화살 자유 비행 + 활채 자유 진동 + 시위 자유 진동 ──
       const limbState2 = interpolateBowByQ(samples, q);
       const F_restore = limbState2.F_draw;
       const k_local = Math.abs(F_restore) / Math.max(Math.abs(q), 0.01);
@@ -2124,8 +2361,11 @@ function simulateRelease(params) {
       q_dot += q_accel * dt;
       if (q < -0.15) q = -0.15;
 
-      // 화살 자유 적분
+      // 화살 자유 적분 (3D)
       stepLumpedMass(arrowState, limbState, restPos, dt, 0);
+
+      // 시위 자유 진동 (nockNode 핀 해제됨)
+      stepStringChain(stringState, anchorTop3d, anchorBot3d, null, dt);
     }
 
     // 분리 감지 → 모달 전환
@@ -2135,13 +2375,12 @@ function simulateRelease(params) {
       phase2Data.t_separation = t * 1000;
       phase2Data.bowVibParams = vibParams;
       phase2Data.modes = modes;
-      // 활채 진동 정보도 저장
       phase2Data.limb_q0 = q;
       phase2Data.limb_qdot0 = q_dot;
       phase2Data.m_eff_limb = m_eff_limb;
-      // 에너지 감사
-      const _cmvx = phase2Data.CoM.vx, _cmvy = phase2Data.CoM.vy;
-      const _KE_arrow = 0.5 * arrowProps.m_total * (_cmvx * _cmvx + _cmvy * _cmvy);
+      // 에너지 감사 (3D)
+      const _cm = phase2Data.CoM;
+      const _KE_arrow = 0.5 * arrowProps.m_total * (_cm.vx*_cm.vx + _cm.vy*_cm.vy + (_cm.vz||0)*(_cm.vz||0));
       const _KE_limb = 0.5 * m_eff_limb * q_dot * q_dot;
       phase2Data.energyAudit = {
         E_stored: vibParams.E_stored,
@@ -2151,14 +2390,14 @@ function simulateRelease(params) {
       };
     }
 
-    // 분리 후 0.5ms → 모달 전환
     if (separated && (t * 1000 - phase2Data.t_separation) > 0.5) break;
 
     // 재접촉 에러
     if (arrowState.recontactError && separated) {
       phase1Frames.push({
         t_ms: t * 1000, drawAmount: limbState.drawAmount,
-        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i] })),
+        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i], z: arrowState.z[i] })),
+        stringNodes: Array.from({ length: stringState.N }, (_, i) => ({ x: stringState.sx[i], y: stringState.sy[i], z: stringState.sz[i] })),
         contactState: arrowState.wasInContact ? 'contact' : 'free',
         onString: arrowState.onString, recontactError: true, q,
       });
@@ -2170,10 +2409,11 @@ function simulateRelease(params) {
       phase1Frames.push({
         t_ms: t * 1000,
         drawAmount: limbState.drawAmount,
-        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i] })),
-        nockPos: { x: lastNockTarget.x, y: lastNockTarget.y }, // 시위 꺾임점
-        anchorTop: { x: limbState.anchorTop.x, y: limbState.anchorTop.y },
-        anchorBot: { x: limbState.anchorBot.x, y: limbState.anchorBot.y },
+        nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i], z: arrowState.z[i] })),
+        stringNodes: Array.from({ length: stringState.N }, (_, i) => ({ x: stringState.sx[i], y: stringState.sy[i], z: stringState.sz[i] })),
+        nockPos: { x: arrowState.x[0], y: arrowState.y[0], z: arrowState.z[0] },
+        anchorTop: { x: anchorTop.x, y: anchorTop.y, z: 0 },
+        anchorBot: { x: anchorBot.x, y: anchorBot.y, z: 0 },
         contactState: arrowState.wasInContact ? 'contact' : 'free',
         onString: arrowState.onString,
         recontactError: arrowState.recontactError,
@@ -2196,42 +2436,40 @@ function simulateRelease(params) {
 
   return { phase1Frames, phase2Data, arrowProps, samples };
 }
+window.__simulateRelease = simulateRelease;
 
 // 모달 중첩으로 임의 시각의 화살 형상 계산 (Phase 2)
 function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
   const { CoM, axisAngle, modalAmps } = phase2Data;
+  const modalAmpsZ = phase2Data.modalAmpsZ || [];
   const modes = phase2Data.modes;
   const N = 12;
   const g = 9.81;
 
-  // CoM 탄도
+  // CoM 탄도 (3D)
   const cx = CoM.x + CoM.vx * t_post_sec;
   const cy = CoM.y + CoM.vy * t_post_sec - 0.5 * g * t_post_sec * t_post_sec;
+  const cz = (CoM.z || 0) + (CoM.vz || 0) * t_post_sec; // z: 중력 없음
 
-  // 비행 각도: 초기에는 화살 축 방향(axisAngle)에서 시작하여
-  // 시간이 지나면 CoM 속도 방향으로 자연스럽게 전환 (공기역학적 정렬)
+  // 비행 각도 블렌딩 (x-y면)
   const vy_t = CoM.vy - g * t_post_sec;
   const velocityAngle = Math.atan2(vy_t, CoM.vx);
-  // 전환 시간 상수: ~50ms 이내에 속도 방향으로 정렬
   const alignTime = 0.05;
   const blend = Math.min(1, t_post_sec / alignTime);
-  // 각도 차이를 -π~π 범위로 정규화하여 보간
   let angleDiff = velocityAngle - axisAngle;
   while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
   while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
   const flightAngle = axisAngle + angleDiff * blend;
 
-  // 화살 축 방향
   const ex = Math.cos(flightAngle), ey = Math.sin(flightAngle);
   const nx = -ey, ny = ex;
 
-  // 각 노드의 위치 계산
   const ds = arrowProps.L / (N - 1);
   const nodes = [];
   for (let i = 0; i < N; i++) {
-    const s = i * ds - arrowProps.L / 2; // CoM 중심 기준
+    const s = i * ds - arrowProps.L / 2;
 
-    // 모달 횡변위
+    // y-축 모달 횡변위
     let w = 0;
     for (let k = 0; k < modalAmps.length && k < modes.length; k++) {
       const { A, phase, omega, damping } = modalAmps[k];
@@ -2239,13 +2477,22 @@ function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
       w += A * decay * Math.sin(omega * t_post_sec + phase) * modes[k].phi[i];
     }
 
+    // z-축 모달 횡변위
+    let wz = 0;
+    for (let k = 0; k < modalAmpsZ.length && k < modes.length; k++) {
+      const { A, phase, omega, damping } = modalAmpsZ[k];
+      const decay = Math.exp(-damping * omega * t_post_sec);
+      wz += A * decay * Math.sin(omega * t_post_sec + phase) * modes[k].phi[i];
+    }
+
     nodes.push({
       x: cx + s * ex + w * nx,
       y: cy + s * ey + w * ny,
+      z: cz + wz,
     });
   }
 
-  return { nodes, cx, cy, flightAngle };
+  return { nodes, cx, cy, cz, flightAngle };
 }
 
 // ─── Three.js 메인 컴포넌트 ───
@@ -2944,7 +3191,7 @@ export default function KoreanBow3D() {
     }
 
     const ag = new THREE.Group();
-    const pts = nodes.map(n => new THREE.Vector3(n.x, n.y, 0));
+    const pts = nodes.map(n => new THREE.Vector3(n.x, n.y, n.z || 0));
     if (pts.length >= 2) {
       const curve = new THREE.CatmullRomCurve3(pts);
       const geom = new THREE.TubeGeometry(curve, pts.length * 2, shaftRadius, 6, false);
@@ -2959,7 +3206,7 @@ export default function KoreanBow3D() {
     const tipGeom = new THREE.ConeGeometry(0.006, 0.04, 6);
     const tipMat = new THREE.MeshPhysicalMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
     const tip = new THREE.Mesh(tipGeom, tipMat);
-    tip.position.set(tipNode.x + Math.cos(tipAngle) * 0.02, tipNode.y + Math.sin(tipAngle) * 0.02, 0);
+    tip.position.set(tipNode.x + Math.cos(tipAngle) * 0.02, tipNode.y + Math.sin(tipAngle) * 0.02, tipNode.z || 0);
     tip.rotation.z = tipAngle - Math.PI / 2;
     ag.add(tip);
 
@@ -3023,23 +3270,30 @@ export default function KoreanBow3D() {
         jogStringRef.current = null;
       }
 
-      // 프레임의 anchor + nockPos로 시위 직접 렌더
-      if (frame.anchorTop && frame.anchorBot && frame.nockPos && sceneRef.current) {
-        const nk = frame.nockPos;
-        const aT = frame.anchorTop;
-        const aB = frame.anchorBot;
-        const pts = [
-          new THREE.Vector3(aB.x, aB.y, 0),
-          new THREE.Vector3(nk.x, nk.y, 0),
-          new THREE.Vector3(aT.x, aT.y, 0),
-        ];
-        const curve = new THREE.CatmullRomCurve3(pts);
-        const strR = (params.stringDiameter || 0.002) * 0.5;
-        const geo = new THREE.TubeGeometry(curve, 12, strR, 4, false);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xe8d8b8 });
-        const mesh = new THREE.Mesh(geo, mat);
-        sceneRef.current.add(mesh);
-        jogStringRef.current = mesh;
+      // 시위 체인 렌더 (24노드 3D polyline) 또는 폴백 (3점 직선)
+      if (sceneRef.current) {
+        let pts;
+        if (frame.stringNodes && frame.stringNodes.length > 2) {
+          // 시위 체인 전체 노드 사용
+          pts = frame.stringNodes.map(n => new THREE.Vector3(n.x, n.y, n.z || 0));
+        } else if (frame.anchorTop && frame.anchorBot && frame.nockPos) {
+          // 폴백: 기존 3점
+          const nk = frame.nockPos, aT = frame.anchorTop, aB = frame.anchorBot;
+          pts = [
+            new THREE.Vector3(aB.x, aB.y, aB.z || 0),
+            new THREE.Vector3(nk.x, nk.y, nk.z || 0),
+            new THREE.Vector3(aT.x, aT.y, aT.z || 0),
+          ];
+        }
+        if (pts && pts.length >= 2) {
+          const curve = new THREE.CatmullRomCurve3(pts);
+          const strR = (params.stringDiameter || 0.002) * 0.5;
+          const geo = new THREE.TubeGeometry(curve, pts.length * 2, strR, 4, false);
+          const mat = new THREE.MeshBasicMaterial({ color: 0xe8d8b8 });
+          const mesh = new THREE.Mesh(geo, mat);
+          sceneRef.current.add(mesh);
+          jogStringRef.current = mesh;
+        }
       }
 
       // lumped-mass 화살 렌더
