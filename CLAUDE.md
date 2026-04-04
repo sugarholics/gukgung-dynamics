@@ -17,7 +17,7 @@
 └── .claude/
     ├── skills/          # 스킬 (physics-engine, arrow-dynamics, threejs-viz, sim-build-test, asymmetric-limb)
     ├── agents/          # 에이전트 (physics-reviewer: 물리 검증 전문가)
-    └── launch.json      # dev server 설정 (npx http-server -p 8082)
+    └── launch.json      # dev server 설정 (npx http-server -p 8083)
 ```
 
 ### 빌드 프로세스
@@ -27,7 +27,7 @@ node build_html.js   # JSX → HTML 변환 (Babel in-browser 방식)
 import문 제거, export default 제거, React/Three.js CDN 주입.
 
 ### 테스트
-- `http://localhost:8082/index.html`에서 확인
+- `http://localhost:8083/index.html`에서 확인
 - 캐시 주의: URL에 `?v=N` 쿼리 추가로 캐시 우회
 - 브라우저 디버그 시 `window.__DEBUG_*` 전역변수로 값 확인 가능 (React 스코프 문제로 console.log 미작동)
 
@@ -61,16 +61,18 @@ computeVibrationParams(params)               ← k_eff, E_stored, ω₀, F_draw 
 ```
 preSampleBowAnchors(params, 31)        ← 활 기하학 31점 사전 샘플
     ↓
-simulateRelease(params)                ← **마스터 함수**: 활채 ODE + 시위 구속 + 화살
-  ├── initLumpedMassArrow()            ← 12노드 lumped-mass chain 초기화
-  ├── interpolateBowByQ()             ← q(활채 변위) 기반 앵커 보간
-  ├── computeNockFromStringConstraint() ← 원-원 교점 (시위 구속)
-  ├── computeBendingForces()           ← 에너지 구배 기반 이산 굽힘력
-  ├── enforceDistanceConstraints()     ← SHAKE 거리 구속
+simulateRelease(params)                ← **마스터 함수**: 활채 ODE + 시위 체인 + 화살 3D
+  ├── initStringChain()               ← 시위 24노드 유질량 체인 초기화 (3D)
+  ├── initLumpedMassArrow()            ← 12노드 lumped-mass chain 초기화 (3D: x,y,z)
+  ├── interpolateBowByQ()             ← q(활채 변위) 기반 앵커+nockingPoint 보간
+  ├── stepStringChain()               ← 시위 체인 Verlet + SHAKE (3D)
+  ├── computeBendingForces()           ← y-축 에너지 구배 굽힘력
+  ├── computeBendingForcesZ()          ← z-축 소각도 유한차분 굽힘력
+  ├── enforceDistanceConstraints()     ← SHAKE (on-string: 2D, 자유비행: 3D)
   ├── computeRestContactForce()        ← rest 일방향 페널티 접촉
-  └── computeModalAmplitudes()         ← lumped→모달 투영 (분리 후)
+  └── computeModalAmplitudes()         ← lumped→모달 투영 (y+z 분리, 분리 후)
     ↓
-computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계산
+computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계산 (y+z)
 ```
 
 ### 함수 상세 — 정적
@@ -95,16 +97,19 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 | `computeArrowProperties` | Spine → EI 변환, 질량 분배 | (params) → {L, m_total, EI, D_outer, ...} |
 | `computeArrowStaticShape` | 정적 처짐 (E-B 보, rest+nock) | (arrowProps, nockPos, restPos) → {nodes, nockAngle, ...} |
 | `preSampleBowAnchors` | 활 기하학 31점 사전 샘플 | (params, n) → [{drawAmount, anchorTop, anchorBot, nockingPoint, pullPoint, q, ...}] |
-| `computeNockFromStringConstraint` | **원-원 교점**으로 nock 위치 결정 | (anchorTop, anchorBot, L_upper, L_lower) → {x, y, valid} |
-| `initLumpedMassArrow` | 12노드 체인 초기화 | (arrowProps, nockPos, restPos) → {N, x, y, vx, vy, m, ...} |
-| `computeBendingForces` | 에너지 구배 기반 이산 굽힘력 | (arrowState) → {fx, fy} |
-| `enforceDistanceConstraints` | SHAKE 거리 구속 (30회 반복) | (state, iterations, pinnedNode) → void |
+| `initStringChain` | 시위 24노드 유질량 체인 초기화 (3D) | (params, anchorTop, anchorBot, nockPos, L_upper, L_lower) → {N, ds, sx, sy, sz, svx, svy, svz, sm, nockNode, ...} |
+| `stepStringChain` | 시위 체인 1스텝 Verlet + SHAKE | (state, anchorTop3d, anchorBot3d, arrowNock3d, dt) → void |
+| `shakeStringChain` | 시위 체인 SHAKE (3D, 핀 노드 지원) | (state, pinned) → void |
+| `initLumpedMassArrow` | 12노드 체인 초기화 (3D) | (arrowProps, nockPos, restPos, z_arrow) → {N, x, y, z, vx, vy, vz, m, ...} |
+| `computeBendingForces` | y-축 에너지 구배 이산 굽힘력 | (arrowState) → {fx, fy} |
+| `computeBendingForcesZ` | z-축 소각도 유한차분 굽힘력 | (arrowState) → {fz} |
+| `enforceDistanceConstraints` | SHAKE (on-string: 2D, 자유비행: 3D) | (state, iterations, pinnedNode) → void |
 | `computeRestContactForce` | rest 일방향 페널티 접촉 | (state, restPos) → {nodeIndex, Fy, inContact} |
-| `stepLumpedMass` | Störmer-Verlet 1스텝 (분리 후 전용) | (state, bowState, restPos, dt) → void |
-| `simulateRelease` | **마스터 함수**: 사전 계산 | (params) → {phase1Frames, phase2Data, arrowProps, samples} |
+| `stepLumpedMass` | Störmer-Verlet 1스텝 (분리 후, 3D) | (state, bowState, restPos, dt) → void |
+| `simulateRelease` | **마스터 함수**: 시위 체인 + 화살 3D 사전 계산 | (params) → {phase1Frames, phase2Data, arrowProps, samples} |
 | `computeFreeFreeModeshapes` | 자유-자유 보 모드형상 1~3차 | (arrowProps) → [{omega, phi[], ...}] |
-| `computeModalAmplitudes` | lumped→모달 투영 | (arrowState, arrowProps, modes) → {CoM, axisAngle, modalAmps} |
-| `computeModalArrowShape` | Phase 2 모달 형상 계산 | (phase2Data, arrowProps, t) → {nodes, cx, cy, flightAngle} |
+| `computeModalAmplitudes` | lumped→모달 투영 (y+z 분리) | (arrowState, arrowProps, modes) → {CoM, axisAngle, modalAmps, modalAmpsZ} |
+| `computeModalArrowShape` | Phase 2 모달 형상 계산 (y+z) | (phase2Data, arrowProps, t) → {nodes, cx, cy, cz, flightAngle} |
 
 ### 좌표계
 - **x축**: 수평. 양(+) = 궁사 방향 (시위 당기는 쪽). 음(-) = 과녁 방향.
@@ -140,13 +145,17 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 - 시위 렌더: **LineCurve3 구간별 직선** (CatmullRom 아님 — V자 꺾임 정확도)
 
 ### 발시 동역학 모델
-- **화살**: 12노드 lumped-mass chain (x, y), Störmer-Verlet, dt=10μs
+- **화살**: 12노드 lumped-mass chain (x, y, z), Störmer-Verlet, dt=10μs
 - **활채**: 1-DOF ODE (q=nock 변위), Klopsteg 결합질량 `m_coupled = m_eff_limb + m_arrow`
-- **시위 구속**: `computeNockFromStringConstraint` 원-원 교점 (비신장 무질량)
-- **분리 조건**: nock 횡력 > nockClipForce (3N) 또는 q ≤ 0.005
-- **Phase 1**: on-string lumped-mass, 프레임 0.1ms 간격 저장
-- **Phase 2**: 분리 후 모달 (자유-자유 보 모드 1~3차), axisAngle→velocityAngle 블렌딩
-- **조그셔틀**: Phase 1 프레임 재생 (시위는 jogStringRef로 직접 렌더, React 시위 숨김)
+- **시위**: 24노드 유질량 체인 (3D), SHAKE 비신장 구속, 5g 균등 분배
+  - on-string: 앵커+nockNode 핀, 자유 노드 Verlet+SHAKE, 렌더링 시 x,y 직선 보간
+  - 분리 후: nockNode 핀 해제 → 자유 진동
+  - z-힘: 체인 nockNode 양옆 노드 방향에서 추출 → archer's paradox 구동
+- **nock 위치**: `interpolateBowByQ`의 nockingPoint 보간값 직접 사용 (원-원 교점 우회)
+- **분리 조건**: (1) nock 횡력 > 3N 또는 (2) Fx > 0 (시위가 화살을 밀기 시작)
+- **Phase 1**: on-string lumped-mass 3D, 프레임 0.1ms 간격 저장 (화살 z + stringNodes)
+- **Phase 2**: 분리 후 모달 (y+z 독립 모드), axisAngle→velocityAngle 블렌딩
+- **조그셔틀**: 시뮬레이션 완료 → 즉시 진입, 자동재생(forward→rewind) 후 수동 탐색
 
 ## 핵심 파라미터 (DEFAULT_PARAMS)
 
@@ -172,14 +181,16 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 - T_brace: 70 N
 - 만작 F_draw: 344 N (35.1 kgf)
 - 저장 에너지: 56.9 J
-- 화살 속도: 61.1 m/s (η=0.82 추정), 실측 37 m/s (Klopsteg η=0.33)
+- 화살 속도: -42.1 m/s (η=0.355, Klopsteg 동역학 시뮬레이션)
+- 분리 시간: 19.31 ms (Fx>0 조건)
+- z-축 paradox 진폭: 9.7 mm (모달 A1z)
+- CoM vz: -0.014 m/s (≈0)
 
 ## 알려진 제한사항
 1. draw 솔버에서 캔틸레버 모멘트 근사 유지 (기하학적 비선형 내부 반복은 brace에서만 적용)
-2. 시위는 비신장 무질량 직선 (정적). 동적에서도 원-원 교점 기하 구속만 사용.
-3. 화살은 2D(x,y)만. **Archer's paradox(z축 횡진동) 미반영** → 3D 확장 계획 수립됨
-4. 공기저항 미반영 (비행 궤적)
-5. 줌손 z축 토크(빨래 짜기) 미반영 → Phase B 계획
+2. 정적 시위는 기하학적 직선 모델 유지 (동적에서만 24노드 체인 사용)
+3. 공기저항 미반영 (비행 궤적)
+4. **줌손 z축 토크(빨래 짜기) 미반영** → 다음 과제
 
 ## 에이전트
 
