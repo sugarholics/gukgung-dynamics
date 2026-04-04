@@ -2568,6 +2568,7 @@ export default function KoreanBow3D() {
   const [jogStep, setJogStep] = useState(0.1); // 드래그 단위 (ms)
   const jogDragRef = useRef({ dragging: false, startX: 0, startTime: 0 });
   const jogDataRef = useRef(null);
+  const jogAutoPlayRef = useRef({ phase: 'idle', speed: 1 }); // 자동재생: forward → rewind → stop
   const restShapeRef = useRef(null);
 
   // 에너지/힘 계산
@@ -3053,6 +3054,7 @@ export default function KoreanBow3D() {
             releaseData: anim.releaseData,
             shaftRadius: (params.arrowOuterDiam || 0.0052) / 2,
           };
+          jogAutoPlayRef.current = { phase: 'forward', speed: 1 }; // 자동재생 시작
           setJogMode(true);
           setJogTime(0);
         }
@@ -3238,6 +3240,46 @@ export default function KoreanBow3D() {
       if (flyingArrowRef.current) flyingArrowRef.current.visible = false;
     }
   }, [jogMode, jogTime, renderLumpedArrow]);
+
+  // 조그셔틀 자동재생: forward(발시→분리) → rewind(분리→발시직전) → stop
+  useEffect(() => {
+    if (!jogMode) return;
+    const ap = jogAutoPlayRef.current;
+    if (ap.phase === 'idle') return;
+
+    const rd = jogDataRef.current?.releaseData;
+    if (!rd) return;
+    const t_sep = rd.phase2Data.t_separation;
+    const endTime = t_sep + 2; // 분리 후 2ms 더 보여줌
+
+    const interval = setInterval(() => {
+      const ap = jogAutoPlayRef.current;
+      if (ap.phase === 'forward') {
+        setJogTime(t => {
+          const next = +(t + 0.2).toFixed(2); // 0.2ms/frame ≈ 실시간의 ~3배속 (60fps기준)
+          if (next >= endTime) {
+            // forward 끝 → 잠시 멈춤 후 rewind
+            setTimeout(() => { jogAutoPlayRef.current.phase = 'rewind'; }, 500);
+            jogAutoPlayRef.current.phase = 'pause';
+            return endTime;
+          }
+          return next;
+        });
+      } else if (ap.phase === 'rewind') {
+        setJogTime(t => {
+          const next = +(t - 0.5).toFixed(2); // 되감기: 2.5배속
+          if (next <= 0) {
+            jogAutoPlayRef.current.phase = 'idle'; // 자동재생 종료
+            return 0;
+          }
+          return next;
+        });
+      }
+      // 'pause', 'idle'이면 아무것도 안함
+    }, 1000 / 60); // 60fps
+
+    return () => clearInterval(interval);
+  }, [jogMode, jogTime]);
 
   // 조그셔틀 종료
   const exitJogMode = useCallback(() => {
