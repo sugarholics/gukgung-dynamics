@@ -2412,7 +2412,25 @@ function simulateRelease(params) {
       phase1Frames.push({
         t_ms: t * 1000, drawAmount: limbState.drawAmount,
         nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i], z: arrowState.z[i] })),
-        stringNodes: Array.from({ length: stringState.N }, (_, i) => ({ x: stringState.sx[i], y: stringState.sy[i], z: stringState.sz[i] })),
+        stringNodes: (() => {
+          // 렌더링용: on-string 시 x,y를 직선 보간 (물리 상태는 보존)
+          const sN = stringState.N, ni = stringState.nockNode;
+          return Array.from({ length: sN }, (_, i) => {
+            let rx = stringState.sx[i], ry = stringState.sy[i];
+            if (stringState.nockPinned) {
+              if (i > 0 && i < ni) {
+                const f = i / ni;
+                rx = stringState.sx[0] + (stringState.sx[ni] - stringState.sx[0]) * f;
+                ry = stringState.sy[0] + (stringState.sy[ni] - stringState.sy[0]) * f;
+              } else if (i > ni && i < sN - 1) {
+                const f = (i - ni) / (sN - 1 - ni);
+                rx = stringState.sx[ni] + (stringState.sx[sN-1] - stringState.sx[ni]) * f;
+                ry = stringState.sy[ni] + (stringState.sy[sN-1] - stringState.sy[ni]) * f;
+              }
+            }
+            return { x: rx, y: ry, z: stringState.sz[i] };
+          });
+        })(),
         contactState: arrowState.wasInContact ? 'contact' : 'free',
         onString: arrowState.onString, recontactError: true, q,
       });
@@ -2425,7 +2443,25 @@ function simulateRelease(params) {
         t_ms: t * 1000,
         drawAmount: limbState.drawAmount,
         nodes: Array.from({ length: arrowState.N }, (_, i) => ({ x: arrowState.x[i], y: arrowState.y[i], z: arrowState.z[i] })),
-        stringNodes: Array.from({ length: stringState.N }, (_, i) => ({ x: stringState.sx[i], y: stringState.sy[i], z: stringState.sz[i] })),
+        stringNodes: (() => {
+          // 렌더링용: on-string 시 x,y를 직선 보간 (물리 상태는 보존)
+          const sN = stringState.N, ni = stringState.nockNode;
+          return Array.from({ length: sN }, (_, i) => {
+            let rx = stringState.sx[i], ry = stringState.sy[i];
+            if (stringState.nockPinned) {
+              if (i > 0 && i < ni) {
+                const f = i / ni;
+                rx = stringState.sx[0] + (stringState.sx[ni] - stringState.sx[0]) * f;
+                ry = stringState.sy[0] + (stringState.sy[ni] - stringState.sy[0]) * f;
+              } else if (i > ni && i < sN - 1) {
+                const f = (i - ni) / (sN - 1 - ni);
+                rx = stringState.sx[ni] + (stringState.sx[sN-1] - stringState.sx[ni]) * f;
+                ry = stringState.sy[ni] + (stringState.sy[sN-1] - stringState.sy[ni]) * f;
+              }
+            }
+            return { x: rx, y: ry, z: stringState.sz[i] };
+          });
+        })(),
         nockPos: { x: arrowState.x[0], y: arrowState.y[0], z: arrowState.z[0] },
         anchorTop: { x: anchorTop.x, y: anchorTop.y, z: 0 },
         anchorBot: { x: anchorBot.x, y: anchorBot.y, z: 0 },
