@@ -3044,14 +3044,9 @@ function KoreanBow3D() {
         if (anim.phase === "drawing") {
           const d = Math.min(1, anim.t * 0.5);
           setDrawAmount(d);
-          if (d >= 1) { anim.phase = "holding"; anim.t = 0; setAnimPhase("holding"); }
-        } else if (anim.phase === "holding") {
-          window.__DEBUG_HOLDING = (window.__DEBUG_HOLDING || 0) + 1;
-          // 만작 상태 저장 (발시 시 사용)
-          if (!anim.savedFullDraw) {
-            anim.savedFullDraw = bowGeomDataRef.current;
-          }
-          // lumped-mass 시뮬레이션 사전 계산 (1회)
+          if (d >= 1) { anim.phase = "computing"; anim.t = 0; setAnimPhase("computing"); }
+        } else if (anim.phase === "computing") {
+          // 만작 도달 → 시뮬레이션 사전 계산 (1회) → 즉시 조그셔틀
           if (!anim.releaseData) {
             window.__DEBUG_SIM_START = Date.now();
             try {
@@ -3063,141 +3058,21 @@ function KoreanBow3D() {
               window.__DEBUG_SIM_END = Date.now();
             }
           }
-          if (anim.t > 0.5) { anim.phase = "releasing"; anim.t = 0; setAnimPhase("releasing"); }
-        } else if (anim.phase === "releasing") {
-          // 실제 발시 시간 ~0.1초 반영: anim.t * 20 → d=0 when anim.t=0.05 (≈0.1 real s)
-          const d = Math.max(0, 1 - anim.t * 20);
-          setDrawAmount(d);
-          if (d <= 0) {
-            anim.phase = "bowVibration";
-            anim.t = 0;
-            // 발사 순간의 nock 위치 캡처 (화살 초기 위치)
-            // 만작 시 저장된 기하학 사용 (releasing 중 bowGeomData가 brace로 변하므로)
-            const bg = anim.savedFullDraw || bowGeomDataRef.current;
-            anim.arrowX = bg ? bg.nockX : 0.8;
-            anim.arrowY = bg && bg.nockingPoint ? bg.nockingPoint.y : 0;
-            anim.needArrowCreate = true;
-            isArrowFlyingRef.current = true;
-
-            // 에너지 기반 발사 속도 + arrowShape 발사 각도
-            const m_arr = (params.arrowMass || 0.025);
-            const v_arrow = Math.sqrt(Math.max(0, 2 * 0.82 * anim.vibParams.E_stored / m_arr));
-            const arrowLen = params.arrowLength || 0.82;
-
-            // 발사 각도: arrowShape nockAngle 또는 기하학 기반
-            let launchAngle = Math.PI; // 기본: -x 방향
-            if (bg && bg.arrowShape) {
-              launchAngle = bg.arrowShape.nockAngle;
-            } else if (bg) {
-              const rp = bg.restPoint || { x: 0, y: 0 };
-              const np = bg.nockingPoint || { x: bg.nockX, y: bg.nockY || 0 };
-              launchAngle = Math.atan2(np.y - rp.y, np.x - rp.x);
-            }
-            // 화살은 nock→tip 방향 (과녁 쪽)으로 비행
-            anim.arrowVx = v_arrow * Math.cos(launchAngle);
-            anim.arrowVy = v_arrow * Math.sin(launchAngle);
-            anim.arrowLen = arrowLen;
-            anim.launchAngle = launchAngle;
-
-            const angleDeg = launchAngle * (180 / Math.PI);
-            setLaunchAngleDeg(angleDeg);
-            setAnimPhase("bowVibration");
-          }
-        } else if (anim.phase === "bowVibration") {
-          // 발시 후 1초: 활 진동 + 화살 비행
-          // anim.t * (1/0.48) = 실제 시간(초), 0.48 t-units ≈ 1 real second
-          const t_real = anim.t / 0.48;
-
-          // ── 활 진동: 물리 기반 감쇠진동 ──
-          // 원인: 활채 탄성복원력(k_eff)과 유효질량(m_eff)의 결합 → ω₀ = √(k_eff/m_eff)
-          // 진폭: 화살 반동 운동량 → 개방형 손잡이를 통한 줌통 진동 초기속도
-          if (bowGroupRef.current && stringMeshRef.current) {
-            const { omega0, omega_d, zeta, A_grip } = anim.vibParams;
-            const vib = A_grip * Math.exp(-zeta * omega0 * t_real) * Math.sin(omega_d * t_real);
-            bowGroupRef.current.position.x = vib;
-            stringMeshRef.current.position.x = vib;
-          }
-
-          // ── 화살 생성 (첫 프레임) ──
-          if (anim.needArrowCreate && sceneRef.current) {
-            anim.needArrowCreate = false;
-            const arrowLen = anim.arrowLen || 0.82;
-            const shaftRadius = (params.arrowOuterDiam || 0.0052) / 2;
-            const ag = new THREE.Group();
-
-            const shaftGeom = new THREE.CylinderGeometry(shaftRadius, shaftRadius, arrowLen, 8);
-            const shaftMat = new THREE.MeshPhysicalMaterial({ color: 0x1a1a1a, roughness: 0.4, metalness: 0.6 });
-            const shaft = new THREE.Mesh(shaftGeom, shaftMat);
-            shaft.rotation.z = Math.PI / 2;
-            ag.add(shaft);
-
-            const tipGeom = new THREE.ConeGeometry(0.006, 0.04, 6);
-            const tipMat = new THREE.MeshPhysicalMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
-            const tip = new THREE.Mesh(tipGeom, tipMat);
-            tip.rotation.z = Math.PI / 2;
-            tip.position.set(-arrowLen / 2 - 0.02, 0, 0);
-            ag.add(tip);
-
-            for (let fi = 0; fi < 3; fi++) {
-              const ang = (fi / 3) * Math.PI * 2;
-              const fletchGeom = new THREE.PlaneGeometry(0.06, 0.015);
-              const fletchMat = new THREE.MeshPhysicalMaterial({
-                color: fi === 0 ? 0xcc2222 : 0xeeeeee, side: THREE.DoubleSide, roughness: 0.8
-              });
-              const fletch = new THREE.Mesh(fletchGeom, fletchMat);
-              fletch.position.set(arrowLen / 2 + 0.05, Math.sin(ang) * 0.008, Math.cos(ang) * 0.008);
-              fletch.rotation.x = ang;
-              ag.add(fletch);
-            }
-
-            // 화살 그룹: 로컬 프레임에서 tip=-x, nock=+x
-            // nock 위치가 (arrowX, arrowY)이므로 중심 = nock - arrowLen/2 방향
-            ag.position.set(anim.arrowX - arrowLen / 2, anim.arrowY, 0);
-            sceneRef.current.add(ag);
-            flyingArrowRef.current = ag;
-          }
-
-          // ── 화살 비행: 에너지 기반 속도 + 중력 ──
-          if (flyingArrowRef.current) {
-            const dt = 0.008 / 0.48;
-            anim.arrowX += anim.arrowVx * dt;
-            anim.arrowVy -= 9.81 * dt; // 중력
-            anim.arrowY += anim.arrowVy * dt;
-            const arrowLen = anim.arrowLen || 0.82;
-            flyingArrowRef.current.position.x = anim.arrowX - arrowLen / 2;
-            flyingArrowRef.current.position.y = anim.arrowY;
-            // 비행 중 피치 회전 (중력에 의한 포물선)
-            const flightAngle = Math.atan2(anim.arrowVy, anim.arrowVx);
-            flyingArrowRef.current.rotation.z = flightAngle - Math.PI; // 로컬 tip=-x → 속도방향 정렬
-            flyingArrowRef.current.visible = (anim.arrowX > -3);
-          }
-
-          // ── 1초 경과 → 조그셔틀 모드 전환 ──
-          if (anim.t > 0.48) {
-            anim.phase = "idle";
-            setIsAnimating(false);
-            setAnimPhase("idle");
-            setDrawAmount(0);
-            isArrowFlyingRef.current = false;
-            if (bowGroupRef.current) bowGroupRef.current.position.x = 0;
-            if (stringMeshRef.current) stringMeshRef.current.position.x = 0;
-            // 비행 화살 정리
-            if (flyingArrowRef.current && sceneRef.current) {
-              flyingArrowRef.current.traverse(c => {
-                if (c.geometry) c.geometry.dispose();
-                if (c.material) c.material.dispose();
-              });
-              sceneRef.current.remove(flyingArrowRef.current);
-              flyingArrowRef.current = null;
-            }
-            // 조그셔틀 데이터: lumped-mass 시뮬레이션 결과 사용
-            jogDataRef.current = {
-              releaseData: anim.releaseData,
-              shaftRadius: (params.arrowOuterDiam || 0.0052) / 2,
-            };
-            setJogMode(true);
-            setJogTime(0);
-          }
+          // 계산 완료 → 즉시 조그셔틀 모드 전환
+          anim.phase = "idle";
+          setIsAnimating(false);
+          setAnimPhase("idle");
+          setDrawAmount(0);
+          isArrowFlyingRef.current = false;
+          if (bowGroupRef.current) bowGroupRef.current.position.x = 0;
+          if (stringMeshRef.current) stringMeshRef.current.position.x = 0;
+          // 조그셔틀 데이터: 시뮬레이션 결과로 구성
+          jogDataRef.current = {
+            releaseData: anim.releaseData,
+            shaftRadius: (params.arrowOuterDiam || 0.0052) / 2,
+          };
+          setJogMode(true);
+          setJogTime(0);
         }
       }
 
@@ -3524,7 +3399,7 @@ function KoreanBow3D() {
               position: "absolute", top: 12, right: 12, background: "rgba(200,50,50,0.8)",
               borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600
             }}>
-              {animPhase === "drawing" ? "당기는 중..." : animPhase === "holding" ? "만작 유지" : animPhase === "releasing" ? "발시!" : "화살 비행 중..."}
+              {animPhase === "drawing" ? "당기는 중..." : animPhase === "computing" ? "시뮬레이션 계산 중..." : "처리 중..."}
             </div>
           )}
 
