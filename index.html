@@ -2298,10 +2298,7 @@ function simulateRelease(params) {
       const y_old = Float64Array.from(y);
       const z_old = Float64Array.from(z);
 
-      // nockTarget: 시위 체인에서 결정된 nock 위치 (x,y는 체인이 결정)
-      // 현재 구조에서 nock은 체인에 핀되어 있으므로, 체인 SHAKE 결과가 nock x,y를 결정
-      // 여기서는 기존 원-원 교점 대신 limb 보간된 nock 위치를 사용
-      const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
+      // nockTarget은 위 C단계에서 이미 계산됨
 
       // 1) x,y 강체 병진
       const dx_rigid = nockTarget.x - x[0];
