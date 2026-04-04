@@ -1555,6 +1555,7 @@ function interpolateBowByQ(samples, q) {
     F_draw: lerp(s0.F_draw, s1.F_draw),
     T_current: lerp(s0.T_current, s1.T_current),
     nockX: lerp(s0.nockX, s1.nockX),
+    nockY: lerp(s0.nockY, s1.nockY),
     drawAmount: lerp(s0.drawAmount, s1.drawAmount),
     restPoint: s0.restPoint,
     q,
@@ -2248,9 +2249,10 @@ function simulateRelease(params) {
       const arrowNock3d = { x: arrowState.x[0], y: arrowState.y[0], z: arrowState.z[0] };
       stepStringChain(stringState, anchorTop3d, anchorBot3d, arrowNock3d, dt);
 
-      // ── C. 시위 힘 방향 ──
-      // x,y: 기존 방식 — 앵커(활채 끝)→nockTarget 방향 (Klopsteg 에너지 전달 보존)
-      const nockTarget = computeNockFromStringConstraint(anchorTop, anchorBot, L_upper, L_lower);
+      // ── C. nock 위치: 정적 솔버 보간값 직접 사용 ──
+      // computeNockFromStringConstraint(원-원 교점)의 기하학적 비선형 우회
+      // q→nockX 매핑이 정적 솔버에서 보장되므로 에너지 전달 정확
+      const nockTarget = { x: limbState.nockX, y: limbState.nockY || 0 };
       const dxT = anchorTop.x - nockTarget.x, dyT = anchorTop.y - nockTarget.y;
       const dxB = anchorBot.x - nockTarget.x, dyB = anchorBot.y - nockTarget.y;
       const distT = Math.sqrt(dxT*dxT + dyT*dyT) || 1e-6;
@@ -2355,13 +2357,14 @@ function simulateRelease(params) {
       const sdLen = Math.sqrt(string_dir_x*string_dir_x + string_dir_y*string_dir_y) || 1e-6;
       const sd_nx = -string_dir_y / sdLen, sd_ny = string_dir_x / sdLen;
       const F_perp_xy = Math.abs(Fx * sd_nx + Fy * sd_ny);
-      // z-힘도 횡력에 포함
-      // 분리 판정: x-y면 횡력만 사용 (Fz는 화살을 옆으로 밀 뿐 클립을 벌리지 않음)
+      // 분리 판정 1: x-y면 횡력이 클립 보유력 초과
       if (F_perp_xy > nockClipF && t > 0.003) {
         arrowState.onString = false;
-        stringState.nockPinned = false; // 시위 nockNode 해제
+        stringState.nockPinned = false;
       }
-      if (q <= 0.005) {
+      // 분리 판정 2: 시위가 화살을 궁사 쪽으로 밀기 시작 (Fx > 0)
+      // → 오니가 시위에서 자연 이탈 (인장→압축 전환)
+      if (Fx > 0 && t > 0.003) {
         arrowState.onString = false;
         stringState.nockPinned = false;
       }
