@@ -2392,8 +2392,9 @@ function simulateRelease(params) {
       // Fy impulse 적산 (y축 발사각 보정용)
       // 1-DOF 모델에서 nock 구속이 Fy의 CoM 가속을 흡수하므로,
       // impulse ratio (Jy/Jx)로 분리 시점 vy를 사후 보정
-      Jy_string += (Fy + (restF.Fy || 0)) * dt;  // rest 접촉력 y성분 포함
-      Jx_string += (-Fx) * dt;  // -Fx: 과녁 방향이 양수
+      // 중력 impulse도 포함 (on-string 동안 시위 구속이 중력을 지탱하므로 사후 보정 필요)
+      Jy_string += (Fy + (restF.Fy || 0) - arrowProps.m_total * 9.81) * dt;
+      Jx_string += Fx * dt;  // Fx 그대로 적산 (음수, 과녁 방향)
       for (let i = 1; i < N; i++) {
         const ax_i = bend.fx[i] / m[i];
         const ay_i = (bend.fy[i] - m[i] * 9.81) / m[i] + (i === restF.nodeIndex && restF.Fy ? restF.Fy / m[i] : 0);
