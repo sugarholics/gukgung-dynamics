@@ -114,7 +114,7 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 ### 좌표계
 - **x축**: 수평. 양(+) = 궁사 방향 (시위 당기는 쪽). 음(-) = 과녁 방향.
 - **y축**: 수직. 양(+) = 위 (상채 방향).
-- **z축**: 횡방향. 양(+) = 활 우측 (화살 위치, 궁사 기준 오른쪽).
+- **z축**: 횡방향. 양(+) = 궁사 기준 왼쪽. 음(-) = 궁사 기준 오른쪽 (화살 위치, z_arrow < 0).
 - nockX는 양수 (궁사 쪽). 화살은 양(+)x에서 음(-)x 방향으로 발사.
 
 ### 3점 위치 (접촉점 오프셋)
@@ -153,9 +153,11 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
   - z-힘: 체인 nockNode 양옆 노드 방향에서 추출 → archer's paradox 구동
 - **nock 위치**: `interpolateBowByQ`의 nockingPoint 보간값 직접 사용 (원-원 교점 우회)
 - **분리 조건**: (1) nock 횡력 > 3N 또는 (2) Fx > 0 (시위가 화살을 밀기 시작)
-- **Phase 1**: on-string lumped-mass 3D, 프레임 0.1ms 간격 저장 (화살 z + stringNodes)
+- **Phase 1**: on-string lumped-mass 3D, 프레임 0.1ms 간격 저장 (화살 z + stringNodes + bowRotZ)
 - **Phase 2**: 분리 후 모달 (y+z 독립 모드), axisAngle→velocityAngle 블렌딩
-- **조그셔틀**: 시뮬레이션 완료 → 즉시 진입, 자동재생(forward→rewind) 후 수동 탐색
+- **줌손 z축 회전**: `computeZRotationParams`로 I_z, k_z 계산. Phase 1: 동적 k_z(T_current 기반), Phase 2: k_z=0(시위 직선) + 500ms 연장 적분 → `zRotFrames`
+- **엄지 이탈 횡력**: `thumbReleaseForce` × exp(-t/1ms), +z 방향 → paradox 구동. 활채 z접촉(페널티)으로 Spine 민감도 반영
+- **조그셔틀**: 시뮬레이션 완료 → 즉시 진입, 자동재생(forward 200ms → rewind) 후 수동 탐색. z축 회전은 zRotFrames 보간
 
 ## 핵심 파라미터 (DEFAULT_PARAMS)
 
@@ -175,22 +177,29 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 | nockingOffset | 0.050 m | 오니 y오프셋 (시위 균형점 기준) | 화살 기울기, paradox |
 | pullOffset | -0.015 m | 당김점 y오프셋 (**nockingOffset 기준**) | 초기발사각 |
 | restOffsetY | 0.003 m | 화살걸이 y오프셋 | 화살 rest 위치 |
+| gripTwistTorque | 0.3 N·m | 줌손 비틀기 토크 (빨래 짜기) | 잔신 z축 회전 |
+| gripTwistDamping | 0.08 | z축 회전 감쇠비 (줌손 마찰) | 잔신 감쇠 |
+| thumbReleaseForce | 5.0 N | 엄지 이탈 횡력 (+z, τ=1ms) | paradox 구동, Spine 민감도 |
 
 **검증된 물리량** (기본 파라미터):
 - Brace height: 15.0 cm ✓
 - T_brace: 70 N
 - 만작 F_draw: 344 N (35.1 kgf)
 - 저장 에너지: 56.9 J
-- 화살 속도: -42.1 m/s (η=0.355, Klopsteg 동역학 시뮬레이션)
-- 분리 시간: 19.31 ms (Fx>0 조건)
-- z-축 paradox 진폭: 9.7 mm (모달 A1z)
-- CoM vz: -0.014 m/s (≈0)
+- 화살 속도: -41.09 m/s (η=0.372, Klopsteg 동역학, m_eff 계수 0.17)
+- 분리 시간: 19.82 ms (Fx>0 조건)
+- y축 발사각: +3.51° (vy=+2.52 m/s, impulse ratio 보정)
+- z-축 paradox A1z: 0.6 mm (Spine 700)
+- CoM vz: -0.76 m/s (활채 폭 + 엄지 횡력 효과)
+- CoM 위치(만작): x=0.233m (화살 길이 63% 지점, tip 8g)
+- 잔신 z회전: 0.53°(분리) → 7.2°(500ms) (M_wrist=0.3, k_z=0 Phase 2)
 
 ## 알려진 제한사항
 1. draw 솔버에서 캔틸레버 모멘트 근사 유지 (기하학적 비선형 내부 반복은 brace에서만 적용)
 2. 정적 시위는 기하학적 직선 모델 유지 (동적에서만 24노드 체인 사용)
 3. 공기저항 미반영 (비행 궤적)
-4. **줌손 z축 토크(빨래 짜기) 미반영** → 다음 과제
+4. **y축 발사각: impulse ratio 사후 보정** — 1-DOF 모델에서 nock y가 기하학적 구속 → on-string vy≈0. 분리 시 Jy/Jx ratio로 vy 사후 보정 (에너지 추가 0.14%). 완전 해결: 화살 y-DOF 독립 (권고사항 B)
+5. m_eff 유효질량 계수 0.17 (tapered beam 근사). 모드형상 적분 기반 정밀화 가능 (0.15~0.18)
 
 ## 에이전트
 
