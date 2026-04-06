@@ -3362,8 +3362,8 @@ export default function KoreanBow3D() {
     const t_sep = p2.t_separation;
     const lastFrameT = frames.length > 0 ? frames[frames.length - 1].t_ms : 0;
 
-    if (jogTime <= lastFrameT) {
-      // ── Phase 1: lumped-mass 프레임 재생 ──
+    if (jogTime <= t_sep) {
+      // ── Phase 1: lumped-mass 프레임 재생 (분리 시점까지) ──
       // 가장 가까운 프레임 찾기
       let fi = 0;
       for (let i = 1; i < frames.length; i++) {
@@ -3780,7 +3780,7 @@ export default function KoreanBow3D() {
             const t_sep = rd ? rd.phase2Data.t_separation : 30;
             const lastT = rd && rd.phase1Frames.length > 0
               ? rd.phase1Frames[rd.phase1Frames.length - 1].t_ms : 30;
-            const isPhase1 = jogTime <= lastT;
+            const isPhase1 = jogTime <= t_sep;
 
             // 현재 프레임 정보
             let info = "";
