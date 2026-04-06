@@ -2759,15 +2759,23 @@ export default function KoreanBow3D() {
   const jogDataRef = useRef(null);
   const jogAutoPlayRef = useRef({ phase: 'idle', speed: 1 }); // 자동재생: forward → rewind → stop
 
-  // 디버그: 외부에서 조그셔틀 직접 진입 (window.__enterJogMode(params))
+  // 조그셔틀 직접 진입 (버튼 onClick + 콘솔 디버그 겸용)
   window.__enterJogMode = (p) => {
-    const rd = simulateRelease(p || params);
-    window.__DEBUG_RELEASE = rd;
-    jogDataRef.current = { releaseData: rd, shaftRadius: ((p||params).arrowOuterDiam || 0.0052) / 2 };
-    jogAutoPlayRef.current = { phase: 'idle', speed: 1 };
-    setDrawAmount(0);
-    setJogMode(true);
-    setJogTime(0);
+    try {
+      window.__DEBUG_SIM_START = Date.now();
+      const rd = simulateRelease(p || params);
+      window.__DEBUG_RELEASE = rd;
+      window.__DEBUG_SIM_END = Date.now();
+      jogDataRef.current = { releaseData: rd, shaftRadius: ((p||params).arrowOuterDiam || 0.0052) / 2 };
+      jogAutoPlayRef.current = { phase: 'idle', speed: 1 };
+      setDrawAmount(0);
+      setIsAnimating(false);
+      setAnimPhase("idle");
+      setJogMode(true);
+      setJogTime(0);
+    } catch(e) {
+      window.__DEBUG_RELEASE_ERROR = e.message + ' | ' + (e.stack||'').substring(0, 300);
+    }
   };
   window.__setJogTime = (t) => setJogTime(t);
   const restShapeRef = useRef(null);
@@ -3221,45 +3229,8 @@ export default function KoreanBow3D() {
       const scene = sceneRef.current;
       if (!camera || !renderer || !scene) return;
 
-      if (isAnimating) {
-        const anim = animRef.current;
-        anim.t += 0.008;
-
-        if (anim.phase === "drawing") {
-          const d = Math.min(1, anim.t * 0.5);
-          setDrawAmount(d);
-          if (d >= 1) { anim.phase = "computing"; anim.t = 0; setAnimPhase("computing"); }
-        } else if (anim.phase === "computing") {
-          // 만작 도달 → 시뮬레이션 사전 계산 (1회) → 즉시 조그셔틀
-          if (!anim.releaseData) {
-            window.__DEBUG_SIM_START = Date.now();
-            try {
-              anim.releaseData = simulateRelease(params);
-              window.__DEBUG_RELEASE = anim.releaseData;
-              window.__DEBUG_SIM_END = Date.now();
-            } catch(e) {
-              window.__DEBUG_RELEASE_ERROR = e.message + ' | ' + e.stack;
-              window.__DEBUG_SIM_END = Date.now();
-            }
-          }
-          // 계산 완료 → 즉시 조그셔틀 모드 전환
-          anim.phase = "idle";
-          setIsAnimating(false);
-          setAnimPhase("idle");
-          setDrawAmount(0);
-          isArrowFlyingRef.current = false;
-          if (bowGroupRef.current) { bowGroupRef.current.position.x = 0; bowGroupRef.current.rotation.y = 0; }
-          if (stringMeshRef.current) { stringMeshRef.current.position.x = 0; stringMeshRef.current.rotation.y = 0; }
-          // 조그셔틀 데이터: 시뮬레이션 결과로 구성
-          jogDataRef.current = {
-            releaseData: anim.releaseData,
-            shaftRadius: (params.arrowOuterDiam || 0.0052) / 2,
-          };
-          jogAutoPlayRef.current = { phase: 'forward', speed: 1 }; // 자동재생 시작
-          setJogMode(true);
-          setJogTime(0);
-        }
-      }
+      // 시뮬레이션은 버튼 onClick → setTimeout → __enterJogMode 경로로 처리
+      // rAF 루프에서는 렌더링만 수행
 
       const cs = cameraStateRef.current;
       if (viewMode === "side") {
@@ -3619,13 +3590,9 @@ export default function KoreanBow3D() {
     if (bowGroupRef.current) { bowGroupRef.current.position.x = 0; bowGroupRef.current.rotation.y = 0; }
     if (stringMeshRef.current) { stringMeshRef.current.position.x = 0; stringMeshRef.current.rotation.y = 0; }
 
-    // 물리 기반 진동 파라미터 사전 계산 (params에 접근 가능한 시점에서 수행)
-    const vibParams = computeVibrationParams(params);
-    animRef.current = { phase: "drawing", t: 0, vibParams };
-    setAnimPhase("drawing");
-    setIsAnimating(true);
-    setDrawAmount(0);
-    setLaunchAngleDeg(null); // 이전 발사각 초기화
+    setLaunchAngleDeg(null);
+    // 시뮬레이션 + 조그셔틀 진입 (drawAmount 변경 없이 직접 실행)
+    window.__enterJogMode(params);
   };
 
   const updateParam = (key, value) => {
