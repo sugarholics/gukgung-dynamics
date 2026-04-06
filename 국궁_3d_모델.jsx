@@ -2249,6 +2249,13 @@ function simulateRelease(params) {
 
   // 화살 초기화 (3D)
   const arrowState = initLumpedMassArrow(arrowProps, nockPos, restPos, z_arrow);
+  // CoM 캐시 초기화 (J_angular 적산에 필요)
+  {
+    let cx=0,cy=0,cz=0,mt=0;
+    for(let i=0;i<arrowState.N;i++){const mi=arrowState.m[i];cx+=mi*arrowState.x[i];cy+=mi*arrowState.y[i];cz+=mi*arrowState.z[i];mt+=mi;}
+    arrowState._comX=cx/mt;arrowState._comY=cy/mt;arrowState._comZ=cz/mt;
+    arrowState._comVx=0;arrowState._comVy=0;arrowState._comVz=0;
+  }
 
   // 시위 체인 초기화 (24노드 3D)
   const stringState = initStringChain(params, fullDraw.anchorTop, fullDraw.anchorBot, nockPos, L_upper, L_lower);
@@ -2273,7 +2280,9 @@ function simulateRelease(params) {
   let phase2Data = null;
   // y축 발사각 보정: Fy/Fx impulse ratio 적산
   let Jy_string = 0;  // ∫Fy dt (시위력 y성분 충격량)
-  let Jx_string = 0;  // ∫(-Fx) dt (시위력 x성분 충격량, 과녁 방향 양수)
+  let Jx_string = 0;  // ∫Fx dt (시위력 x성분 충격량)
+  // angular impulse: ∫(r_nock-CoM × F) dt → 분리 시 초기 각속도
+  let J_angular = 0;  // ∫τ dt (CoM 기준 토크 충격량)
   const totalSteps = Math.ceil(T_MAX / dt);
 
   for (let step = 0; step <= totalSteps; step++) {
@@ -2379,6 +2388,25 @@ function simulateRelease(params) {
       // 중력 impulse도 포함 (on-string 동안 시위 구속이 중력을 지탱하므로 사후 보정 필요)
       Jy_string += (Fy + (restF.Fy || 0) - arrowProps.m_total * 9.81) * dt;
       Jx_string += Fx * dt;  // Fx 그대로 적산 (음수, 과녁 방향)
+      // angular impulse: nock-CoM 축방향 거리 × Fy 수직성분
+      // 화살축을 따른 nock-CoM 거리 = 화살 전체 길이의 (1 - CoM비율)
+      // Fy는 이 레버암에 대해 토크를 생성
+      // on-string 모델에서 실제 r×F가 0이므로 분석적 추정
+      {
+        // 화살축 방향
+        const ax = arrowState.x[arrowState.N-1] - arrowState.x[0];
+        const ay = arrowState.y[arrowState.N-1] - arrowState.y[0];
+        const aLen = Math.sqrt(ax*ax + ay*ay) || 1e-6;
+        const ex = ax/aLen, ey = ay/aLen;
+        // nock-CoM 벡터를 축 방향으로 투영 → 레버암
+        const rx = arrowState._comX - arrowState.x[0];
+        const ry = arrowState._comY - arrowState.y[0];
+        const r_along = rx*ex + ry*ey; // 축 방향 거리 (양수 = tip 방향)
+        // F의 축 수직 성분: F_perp = F - (F·e)e → cross = Fx*ey - Fy*ex
+        const F_perp = Fx*ey - Fy*ex; // 축 수직 힘 (CCW torque 방향)
+        // 토크 = r_along × F_perp
+        J_angular += r_along * F_perp * dt;
+      }
       for (let i = 1; i < N; i++) {
         const ax_i = bend.fx[i] / m[i];
         const ay_i = (bend.fy[i] - m[i] * 9.81) / m[i] + (i === restF.nodeIndex && restF.Fy ? restF.Fy / m[i] : 0);
@@ -2521,7 +2549,57 @@ function simulateRelease(params) {
         for (let i = 0; i < _N; i++) _vy[i] += dvy;
       }
 
+      // ── angular impulse 보정 (축-속도 불일치 → 초기 각속도) ──
+      // I_CoM = Σ m_i × r_i² (CoM 기준 관성모멘트)
+      {
+        const { N:_N2, x:_x2, y:_y2, m:_m2 } = arrowState;
+        let I_CoM = 0;
+        for (let i = 0; i < _N2; i++) {
+          const dx = _x2[i] - arrowState._comX;
+          const dy = _y2[i] - arrowState._comY;
+          I_CoM += _m2[i] * (dx*dx + dy*dy);
+        }
+        const omega_0 = I_CoM > 1e-8 ? J_angular / I_CoM : 0;
+        // Phase 2에 전달
+        arrowState._omega0_angular = omega_0;
+        arrowState._I_CoM = I_CoM;
+        arrowState._J_angular = J_angular;
+      }
+
+      // ── A1y 정적 처짐 추정 ──
+      // on-string 동안 nock+rest 구속 하 정적 처짐이 1차 모드를 여기
+      // 만작 화살 기울기(nock-rest y차이)에서 추정
+      {
+        const nockY = arrowState.y[0];
+        const restIdx = arrowState.restNodeIdx;
+        const restY = arrowState.y[restIdx];
+        // 정적 처짐: nock-rest 사이 빔 처짐의 최대값
+        // 균일 보 정적 처짐: δ = w*L^4/(384*EI) (양단 고정, 균일 하중)
+        // 여기서는 자중 처짐 + 시위 Fy에 의한 처짐
+        const L_nr = Math.abs(restIdx) * arrowState.ds; // nock-rest 거리
+        const w_gravity = arrowProps.m_total * 9.81 / arrowProps.L; // 단위길이 하중
+        const delta_static = w_gravity * Math.pow(L_nr, 4) / (384 * arrowProps.EI);
+        // 화살 기울기에 의한 추가 처짐: nock-rest y차이가 만작 기울기를 반영
+        const tiltDeflection = Math.abs(nockY - restY) - Math.abs(arrowState.y[0] - arrowState.y[arrowState.N-1]) * restIdx / (arrowState.N-1);
+        arrowState._A1y_static = Math.max(delta_static, Math.abs(tiltDeflection)) || 0;
+      }
+
       phase2Data = computeModalAmplitudes(arrowState, arrowProps, modes);
+
+      // A1y 보정: 정적 추정값과 기존 모달 투영의 max
+      if (phase2Data.modalAmps && phase2Data.modalAmps[0]) {
+        const A1y_orig = phase2Data.modalAmps[0].A;
+        const A1y_static = arrowState._A1y_static || 0;
+        if (A1y_static > A1y_orig) {
+          phase2Data.modalAmps[0].A = A1y_static;
+        }
+      }
+
+      // angular impulse → Phase 2 초기 각속도
+      phase2Data.omega0_angular = arrowState._omega0_angular || 0;
+      phase2Data.J_angular = arrowState._J_angular || 0;
+      phase2Data.I_CoM = arrowState._I_CoM || 0;
+
       phase2Data.t_separation = t * 1000;
       phase2Data.bowVibParams = vibParams;
       phase2Data.modes = modes;
@@ -2663,6 +2741,49 @@ function simulateRelease(params) {
 }
 window.__simulateRelease = simulateRelease;
 
+// 파라미터 스윕: nockingOffset × restOffsetY 조합의 발사 특성 분석
+window.__paramSweep = function(baseParams) {
+  const bp = baseParams || DEFAULT_PARAMS;
+  const nockOffsets = [0, 0.010, 0.020, 0.030, 0.040, 0.050, 0.060, 0.070];
+  const restOffsets = [-0.005, 0, 0.003, 0.005, 0.010, 0.015];
+  const results = [];
+
+  for (const no of nockOffsets) {
+    for (const ro of restOffsets) {
+      const p = Object.assign({}, bp, { nockingOffset: no, restOffsetY: ro });
+      try {
+        const rd = simulateRelease(p);
+        const p2 = rd.phase2Data;
+        const f0 = rd.phase1Frames[0];
+        const n0 = f0.nodes[0], n11 = f0.nodes[f0.nodes.length - 1];
+        const tiltDeg = Math.atan2(n11.y - n0.y, n11.x - n0.x) * 180 / Math.PI + 180;
+        const axisAng = p2.axisAngle * 180 / Math.PI + 180;
+        const velAng = Math.atan2(-p2.CoM.vy, -p2.CoM.vx) * 180 / Math.PI;
+        results.push({
+          nock_mm: +(no * 1000).toFixed(0),
+          rest_mm: +(ro * 1000).toFixed(0),
+          tilt0: +tiltDeg.toFixed(2),
+          vx: +p2.CoM.vx.toFixed(1),
+          vy: +p2.CoM.vy.toFixed(2),
+          angle_xy: +velAng.toFixed(2),
+          axis_deg: +axisAng.toFixed(2),
+          axis_vel_diff: +(axisAng - velAng).toFixed(2),
+          A1y_mm: +(p2.modalAmps[0].A * 1000).toFixed(2),
+          A1z_mm: +(p2.modalAmpsZ[0].A * 1000).toFixed(2),
+          omega0: +(p2.omega0_angular || 0).toFixed(3),
+          eta: +((p2.energyAudit.eta || 0) * 100).toFixed(1),
+          t_sep: +p2.t_separation.toFixed(2),
+        });
+      } catch(e) {
+        results.push({ nock_mm: +(no*1000).toFixed(0), rest_mm: +(ro*1000).toFixed(0), error: e.message });
+      }
+    }
+  }
+  console.table(results);
+  window.__sweepResults = results;
+  return results;
+};
+
 // 모달 중첩으로 임의 시각의 화살 형상 계산 (Phase 2)
 function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
   const { CoM, axisAngle, modalAmps } = phase2Data;
@@ -2677,14 +2798,17 @@ function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
   const cz = (CoM.z || 0) + (CoM.vz || 0) * t_post_sec; // z: 중력 없음
 
   // 비행 각도 블렌딩 (x-y면)
+  // angular impulse에 의한 초기 각속도 반영: 분리 직후 축이 ω₀로 회전
+  const omega_0 = phase2Data.omega0_angular || 0;
+  const axisAngle_t = axisAngle + omega_0 * t_post_sec; // 각속도에 의한 축 회전
   const vy_t = CoM.vy - g * t_post_sec;
   const velocityAngle = Math.atan2(vy_t, CoM.vx);
-  const alignTime = 0.05;
+  const alignTime = 0.05; // 깃 복원 시상수 (공력 근사)
   const blend = Math.min(1, t_post_sec / alignTime);
-  let angleDiff = velocityAngle - axisAngle;
+  let angleDiff = velocityAngle - axisAngle_t;
   while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
   while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-  const flightAngle = axisAngle + angleDiff * blend;
+  const flightAngle = axisAngle_t + angleDiff * blend;
 
   const ex = Math.cos(flightAngle), ey = Math.sin(flightAngle);
   const nx = -ey, ny = ex;
