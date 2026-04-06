@@ -2328,6 +2328,8 @@ function simulateRelease(params) {
       const Fy = T_dynamic * e_sum_y / e_sum_len;
       // z: 체인 기하에서 추출한 횡력 (에너지 분배와 독립)
       const Fz = T_dynamic * e_sum_z / e_sum_len;
+      // 프레임 저장용 캐시
+      arrowState._Fx = Fx; arrowState._Fy = Fy; arrowState._Fz = Fz;
 
       // ── E. 활채 ODE ──
       const F_restore = limbState.F_draw;
@@ -2612,6 +2614,8 @@ function simulateRelease(params) {
         // CoM 위치+속도 (질량가중, 인라인)
         CoM: { x: arrowState._comX, y: arrowState._comY, z: arrowState._comZ,
                vx: arrowState._comVx, vy: arrowState._comVy, vz: arrowState._comVz },
+        // 시위력 (nock에 작용, 화살표 시각화용)
+        stringForce: arrowState.onString ? { Fx: arrowState._Fx || 0, Fy: arrowState._Fy || 0, Fz: arrowState._Fz || 0 } : null,
       });
     }
   }
@@ -2754,6 +2758,18 @@ export default function KoreanBow3D() {
   const jogDragRef = useRef({ dragging: false, startX: 0, startTime: 0 });
   const jogDataRef = useRef(null);
   const jogAutoPlayRef = useRef({ phase: 'idle', speed: 1 }); // 자동재생: forward → rewind → stop
+
+  // 디버그: 외부에서 조그셔틀 직접 진입 (window.__enterJogMode(params))
+  window.__enterJogMode = (p) => {
+    const rd = simulateRelease(p || params);
+    window.__DEBUG_RELEASE = rd;
+    jogDataRef.current = { releaseData: rd, shaftRadius: ((p||params).arrowOuterDiam || 0.0052) / 2 };
+    jogAutoPlayRef.current = { phase: 'idle', speed: 1 };
+    setDrawAmount(0);
+    setJogMode(true);
+    setJogTime(0);
+  };
+  window.__setJogTime = (t) => setJogTime(t);
   const restShapeRef = useRef(null);
 
   // 에너지/힘 계산
@@ -3334,6 +3350,8 @@ export default function KoreanBow3D() {
 
   // CoM 마커 (밝은 구)
   const comMarkerRef = useRef(null);
+  // 시위력 화살표 (ArrowHelper)
+  const forceArrowRef = useRef(null);
 
   useEffect(() => {
     if (!jogMode || !jogDataRef.current || !jogDataRef.current.releaseData) return;
@@ -3415,8 +3433,34 @@ export default function KoreanBow3D() {
         comMarkerRef.current = sp;
       }
 
+      // 시위력 화살표 (Phase 1, on-string)
+      if (forceArrowRef.current && sceneRef.current) {
+        sceneRef.current.remove(forceArrowRef.current);
+        forceArrowRef.current = null;
+      }
+      if (frame.stringForce && sceneRef.current && frame.onString) {
+        const sf = frame.stringForce;
+        const fMag = Math.sqrt(sf.Fx*sf.Fx + sf.Fy*sf.Fy + sf.Fz*sf.Fz);
+        if (fMag > 0.1) {
+          const dir = new THREE.Vector3(sf.Fx/fMag, sf.Fy/fMag, sf.Fz/fMag);
+          const origin = new THREE.Vector3(
+            frame.nodes[0].x, frame.nodes[0].y, frame.nodes[0].z || 0
+          );
+          // 길이: 힘 크기에 비례 (100N → 0.15m, 최대 0.25m)
+          const len = Math.min(0.25, fMag * 0.0015);
+          const arrow = new THREE.ArrowHelper(dir, origin, len, 0xff4444, len * 0.35, len * 0.18);
+          sceneRef.current.add(arrow);
+          forceArrowRef.current = arrow;
+        }
+      }
+
     } else {
       // ── Phase 2: 모달 중첩 자유 비행 ──
+      // 시위력 화살표 제거 (분리 후)
+      if (forceArrowRef.current && sceneRef.current) {
+        sceneRef.current.remove(forceArrowRef.current);
+        forceArrowRef.current = null;
+      }
       setDrawAmount(0);
       isArrowFlyingRef.current = true;
 
@@ -3856,9 +3900,11 @@ export default function KoreanBow3D() {
                     if (!fr.CoM) return null;
                     const c = fr.CoM;
                     const spd = Math.sqrt(c.vx*c.vx+c.vy*c.vy+c.vz*c.vz);
+                    const sf = fr.stringForce;
+                    const fMag = sf ? Math.sqrt(sf.Fx*sf.Fx+sf.Fy*sf.Fy+sf.Fz*sf.Fz) : 0;
                     return (
                       <div style={{ marginLeft: 4, fontSize: 10, color: "#88ddaa" }}>
-                        CoM v={spd.toFixed(1)} vy={c.vy.toFixed(2)}
+                        v={spd.toFixed(1)} {sf ? <span style={{color:"#ff8888"}}>F={fMag.toFixed(0)}N Fy={sf.Fy.toFixed(1)}</span> : null}
                       </div>
                     );
                   })()}
