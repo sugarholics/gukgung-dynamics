@@ -187,8 +187,8 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 - T_brace: 70 N
 - 만작 F_draw: 344 N (35.1 kgf)
 - 저장 에너지: 56.9 J
-- 화살 속도: -41.09 m/s (η=0.372, Klopsteg 동역학, m_eff 계수 0.17)
-- 분리 시간: 19.82 ms (Fx>0 조건)
+- 화살 속도: -42.70 m/s (η=0.402, Klopsteg 동역학, m_eff 계수 0.123)
+- 분리 시간: 19.07 ms (Fx>0 조건)
 - y축 발사각: -3.77° (vy=-2.71 m/s, impulse ratio 보정, 아래 방향)
 - z-축 paradox A1z: 0.6 mm (Spine 700)
 - CoM vz: -0.76 m/s (활채 폭 + 엄지 횡력 효과)
@@ -200,7 +200,7 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 2. 정적 시위는 기하학적 직선 모델 유지 (동적에서만 24노드 체인 사용)
 3. 공기저항 미반영 (비행 궤적)
 4. **y축 발사각: impulse ratio 사후 보정** — 1-DOF 모델에서 nock y가 기하학적 구속 → on-string vy≈0. 분리 시 Jy/Jx ratio로 vy 사후 보정 (중력 포함, 에너지 추가 ~0.16%). 완전 해결: 화살 y-DOF 독립 (권고사항 B)
-5. m_eff 유효질량 계수 0.17 (tapered beam 근사). 모드형상 적분 기반 정밀화 가능 (0.15~0.18)
+5. m_eff 유효질량 계수 0.123 (tapered beam 모드형상 적분: h(s)=h₀(1-0.55s/L), w(s)=w₀(1-0.3s/L))
 
 ## 에이전트
 
