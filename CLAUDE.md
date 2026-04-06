@@ -158,6 +158,7 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 - **Phase 2**: 분리 후 모달 (y+z 독립 모드), axisAngle→velocityAngle 블렌딩
 - **줌손 z축 회전**: `computeZRotationParams`로 I_z, k_z 계산. Phase 1: 동적 k_z(T_current 기반), Phase 2: k_z=0(시위 직선) + 500ms 연장 적분 → `zRotFrames`
 - **엄지 이탈 횡력**: `thumbReleaseForce` × exp(-t/1ms), +z 방향 → paradox 구동. 활채 z접촉(페널티)으로 Spine 민감도 반영
+- **활채 비틂(torsion)**: 정적 준정적 근사. 시위 z-오프셋 → 비틂 모멘트 → 앵커 z-편향. GJ=33.4 N·m²(등방성), 복합재 5~8
 - **조그셔틀**: 시뮬레이션 완료 → 즉시 진입, 자동재생(forward 200ms → rewind) 후 수동 탐색. z축 회전은 zRotFrames 보간
 
 ## 핵심 파라미터 (DEFAULT_PARAMS)
