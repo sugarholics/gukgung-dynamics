@@ -5,84 +5,63 @@ description: "빌드-테스트-디버그 자동화 스킬. JSX 코드 수정 후
 
 # 시뮬레이터 빌드-테스트-디버그 스킬
 
-## 왜 이 스킬이 필요한가
-
-이 프로젝트의 빌드-테스트 사이클은 매번 동일한 패턴을 따르지만, 실수하기 쉬운 함정이 여럿 있다:
-- 브라우저 캐시로 인해 구버전이 표시됨
-- React 스코프 내 console.log가 Chrome 도구로 캡처되지 않음
-- form_input으로 슬라이더 변경 시 React state가 연동되지 않는 경우가 있음
-
-이 스킬은 검증된 패턴만 사용하도록 안내한다.
-
-## 빌드 프로세스
-
-### 1단계: 빌드
+## 빌드
 ```bash
-node build_html.js
-```
-결과: `index.html` 생성 (~80KB). 프로젝트 루트에서 실행할 것.
-
-### 2단계: 브라우저 로드 (캐시 우회 필수)
-```
-http://localhost:8082/index.html?v={timestamp}
-```
-**절대 규칙**: 빌드할 때마다 URL의 `?v=` 파라미터를 변경할 것. 동일 URL 재방문은 캐시된 구버전을 표시할 수 있다.
-
-### 3단계: 슬라이더 조작
-브라우저에서 당김 비율 등을 변경할 때:
-```
-1. find tool로 슬라이더 찾기
-2. form_input으로 값 설정
-3. 1초 대기 (React re-render 시간)
-4. screenshot으로 확인
+node build_html.js   # → index.html (~185KB)
 ```
 
-주의: `form_input`이 React state를 업데이트하지 못하는 경우가 있다. 이때는 JavaScript로 네이티브 setter를 사용:
+## 브라우저 로드 (캐시 우회 필수)
+```
+http://localhost:8083/index.html?v={timestamp}
+```
+
+## 발시 테스트 (권장 방법)
+
+### 즉시 조그셔틀 진입:
 ```javascript
-const slider = document.querySelector('input[type="range"]');
-const nativeSetter = Object.getOwnPropertyDescriptor(
-  window.HTMLInputElement.prototype, 'value').set;
-nativeSetter.call(slider, 0.5);
+window.__enterJogMode(DEFAULT_PARAMS)  // ~500ms 계산 + 렌더
+```
+
+### 시간 이동:
+```javascript
+window.__setJogTime(10)  // 10ms로 이동
+```
+
+### 파라미터 스윕 (48조합):
+```javascript
+window.__paramSweep()  // nockOffset × restOffset 결과 테이블
+```
+
+## 디버그 — console.log 금지, 전역변수 사용
+
+```javascript
+window.__DEBUG_RELEASE                    // simulateRelease 전체 결과
+window.__DEBUG_RELEASE.phase2Data.CoM     // CoM 속도/위치
+window.__DEBUG_RELEASE.phase2Data.energyAudit  // 에너지 감사
+window.__DEBUG_RELEASE.phase1Frames[0].CoM     // Phase 1 CoM
+window.__DEBUG_RELEASE.phase1Frames[0].stringForce  // 시위력
+```
+
+## 슬라이더 조작 (React state 연동)
+```javascript
+const slider = document.querySelectorAll('input[type="range"]')[15]; // 오니 오프셋
+const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+nativeSetter.call(slider, 0);
 slider.dispatchEvent(new Event('input', { bubbles: true }));
 ```
 
-### 4단계: 디버그 값 확인
+## 검증 기준 (2026-04-07)
 
-**console.log는 사용하지 말 것.** Babel 트랜스파일 + React 스코프 문제로 Chrome 콘솔 도구에 캡처되지 않는다.
+| 항목 | 정상 값 |
+|------|--------|
+| vx | -42.70 m/s |
+| vy (nock50mm) | -2.80 m/s |
+| η | 40.2% |
+| t_sep | 19.07 ms |
+| nock=0 → vy | -0.18 m/s (중력) |
 
-대신 `window.__DEBUG_*` 전역변수 패턴 사용:
-```javascript
-// JSX 코드 안에서:
-window.__DEBUG_ARROW = { rp: [rp.x, rp.y], np: [np.x, np.y], ux, uy };
-
-// 브라우저에서 JavaScript tool로 읽기:
-JSON.stringify(window.__DEBUG_ARROW)
+## 전형적 테스트 시퀀스
 ```
-
-또는 DOM 오버레이 패턴 (화면에 직접 표시):
-```javascript
-let dbg = document.getElementById('my-debug');
-if (!dbg) {
-  dbg = document.createElement('div');
-  dbg.id = 'my-debug';
-  dbg.style.cssText = 'position:fixed;top:5px;left:200px;color:lime;' +
-    'font:11px monospace;z-index:99999;background:rgba(0,0,0,0.9);padding:4px';
-  document.body.appendChild(dbg);
-}
-dbg.textContent = `값: ${myValue.toFixed(3)}`;
+Edit JSX → node build_html.js → navigate(?v=N) → wait(10s) →
+__enterJogMode(DEFAULT_PARAMS) → wait(2s) → __setJogTime(10) → screenshot
 ```
-
-**디버그 코드는 확인 후 반드시 제거할 것.**
-
-## 전형적인 빌드-테스트 시퀀스
-
-```
-Edit JSX → build_html.js → navigate(?v=N) → wait(2s) → find slider → form_input → wait(1s) → screenshot → [필요시 zoom/javascript_tool]
-```
-
-## 발시 시뮬레이션 테스트
-
-1. 페이지 로드 후 "발시 시뮬레이션" 버튼 클릭
-2. 4초 대기 (drawing → holding → releasing → vibration 전체 사이클)
-3. 스크린샷으로 최종 상태 확인
-4. 애니메이션 중간 캡처가 필요하면 wait(1.5s) 후 스크린샷
