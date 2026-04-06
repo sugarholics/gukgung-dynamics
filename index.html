@@ -83,6 +83,9 @@ const DEFAULT_PARAMS = {
   gripTwistTorque: 0.3,   // 줌손 비틀기 토크 (N·m) — 만작 시 1시 방향 기울임
   gripTwistDamping: 0.08, // z축 회전 감쇠비 — 줌손 마찰
 
+  // 활채 비틂 (torsion) — 시위 z-오프셋에 의한 면외 비틂
+  torsionalGJ: 33.4,      // 비틂 강성 GJ (N·m²) — 등방성 FRP 기준. 복합재 UD: 5~8
+
   // 화살 물리 (Spine 기반 카본 튜브)
   arrowLength: 0.82,          // 화살 전체 길이 (m) — 오니~촉 끝
   arrowMass: 0.025,           // 총 질량 (kg) — 슬라이더: 0.020~0.035
@@ -1548,10 +1551,21 @@ function preSampleBowAnchors(params, n = 21) {
     const L_upper = Math.sqrt(dxT * dxT + dyT * dyT);
     const L_lower = Math.sqrt(dxB * dxB + dyB * dyB);
 
+    // 활채 비틂에 의한 앵커 z-보정 (정적 준정적 근사)
+    // M_twist = T × z_arrow × sin(시위-고자 각도) ≈ T × z_arrow × (nockY_range / distAnchor)
+    const z_arrow_val = -((params.limbWidth || 0.028) / 2 + 0.003); // 화살 z위치
+    const GJ = params.torsionalGJ || 33.4;
+    const limbArcLen = (params.bowLength / 2 - params.gripLength / 2 - params.siyahLength);
+    const T_cur = g.T_current || 0;
+    // 시위 방향의 z-성분이 만드는 비틂 모멘트
+    const M_twist = Math.abs(T_cur * z_arrow_val * (L_upper > 0.01 ? (nockPt.y - anchorTop.y) / L_upper : 0));
+    const phi_twist = limbArcLen > 0 ? M_twist * limbArcLen / GJ : 0;
+    const dz_anchor = phi_twist * (params.siyahLength || 0.08); // 고자 끝의 z-편향
+
     samples.push({
       drawAmount: d,
       anchorTop, anchorBot,
-      T_current: g.T_current || 0,
+      T_current: T_cur,
       F_draw: g.F_draw || 0,
       nockX: g.nockX,
       nockY: g.nockY || 0,
@@ -1559,6 +1573,8 @@ function preSampleBowAnchors(params, n = 21) {
       pullPoint: { ...pullPt },
       restPoint: g.restPoint ? { ...g.restPoint } : { x: 0, y: params.restOffsetY || 0 },
       L_upper, L_lower,
+      dz_anchor_twist: dz_anchor, // 비틂에 의한 앵커 z-편향 (mm)
+      phi_twist_deg: phi_twist * 180 / Math.PI, // 비틂각 (°)
       // q = nock 변위 (brace 기준, 나중에 채움)
       q: 0,
     });
@@ -1624,6 +1640,7 @@ function interpolateBowByQ(samples, q) {
     },
     drawAmount: lerp(s0.drawAmount, s1.drawAmount),
     restPoint: s0.restPoint,
+    dz_anchor_twist: lerp(s0.dz_anchor_twist || 0, s1.dz_anchor_twist || 0),
     q,
   };
 }
@@ -2326,9 +2343,10 @@ function simulateRelease(params) {
     const anchorTop = limbState.anchorTop;
     const anchorBot = limbState.anchorBot;
 
-    // 3D 앵커 (시위 앵커 = 활 중심면 z=0)
-    const anchorTop3d = { x: anchorTop.x, y: anchorTop.y, z: 0 };
-    const anchorBot3d = { x: anchorBot.x, y: anchorBot.y, z: 0 };
+    // 3D 앵커 (시위 앵커 = 활 중심면 z=0 + 비틂 보정)
+    const dz_twist = limbState.dz_anchor_twist || 0;
+    const anchorTop3d = { x: anchorTop.x, y: anchorTop.y, z: dz_twist };
+    const anchorBot3d = { x: anchorBot.x, y: anchorBot.y, z: -dz_twist };
 
     if (arrowState.onString) {
       // ── B. 시위 체인 적분 ──
