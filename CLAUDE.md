@@ -134,9 +134,10 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 - EI(s) 프로파일: 줌통 = limbRootEI × gripStiffnessRatio, 경계에서 코사인 보간 (±1.5cm)
 - 무현 형상: 자연곡률 κ₀(s)만으로 적분 (반곡 C자 형태)
 - **비대칭 모델**: `limbAsymmetryRatio`로 하채 EI를 독립 스케일링. 상하채 beamUpper/beamLower 별도 생성.
+- **nockY 자기일관**: `solveBrace`에서 nockY-형상 재계산 2-3회 반복 → 비대칭 활에서 nockY ≠ 0 자동 결정
 
 ### 솔버 구조
-- **solveBrace**: 기하급수 T 탐색(10→20→40→...) + 이분법(50회), 내부=형상-힘 자기일관(3회, relaxation 0.5)
+- **solveBrace**: 기하급수 T 탐색(10→20→40→...) + 이분법(50회), 내부=형상-힘 자기일관(3회, relaxation 0.5), nockY 자기일관 루프(2-3회)
 - **solveDraw**: loadFactor 이분법으로 nockX 맞춤 → T, F_draw를 기하학에서 역산
 
 ### 시위 모델 (정적)

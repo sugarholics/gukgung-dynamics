@@ -723,8 +723,22 @@ function solveBrace(params) {
       }
     }
 
-    // 정확한 nock 위치로 형상 재계산
-    const state = computeBowStateWithTension(params, T_mid, { x: nockX, y: nockY });
+    // 정확한 nock 위치로 형상 재계산 (nockY 자기일관 루프)
+    // limbAsymmetryRatio != 1일 때 nockY-형상 결합이 수렴하도록 2-3회 반복
+    let state = computeBowStateWithTension(params, T_mid, { x: nockX, y: nockY });
+    for (let nockIter = 0; nockIter < 2; nockIter++) {
+      const topAnchorR = state.doraeTop || state.yangyangiTop;
+      const botAnchorR = state.doraeBottom || state.yangyangiBottom;
+      if (!topAnchorR || !botAnchorR) break;
+      const dtR = Math.sqrt((nockX - topAnchorR.x) ** 2 + (nockY - topAnchorR.y) ** 2);
+      const dbR = Math.sqrt((nockX - botAnchorR.x) ** 2 + (nockY - botAnchorR.y) ** 2);
+      if (dtR + dbR > 1e-8) {
+        const newNockY = (topAnchorR.y * dbR + botAnchorR.y * dtR) / (dtR + dbR);
+        if (Math.abs(newNockY - nockY) < 1e-6) break; // 수렴
+        nockY = newNockY;
+        state = computeBowStateWithTension(params, T_mid, { x: nockX, y: nockY });
+      }
+    }
 
     // 시위 길이 확인
     const { computedLen, mode: actualMode } = computeStringLength(params, state, nockX, nockY);
