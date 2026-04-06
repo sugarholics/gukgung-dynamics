@@ -153,12 +153,18 @@ const limbPoints = [
 
 반환값에 `beamUpper`, `beamLower`, `doraeTop`, `doraeBottom`, `yangyangiTop`, `yangyangiBottom` 포함.
 
-## 검증된 물리량 (비대칭 테스트)
+## 검증된 물리량 (비대칭 테스트, 2026-04-07)
 
-| limbAsymmetryRatio | Brace height | T_brace | 비고 |
-|-------------------|-------------|---------|------|
-| 1.0 (대칭) | 15.0 cm | 519 N | 기본값과 동일 |
-| 1.3 (하채 강성) | 15.3 cm | 577 N | nockY ≈ +0.8 cm (상방 편향) |
+| limbAsymmetryRatio | brace nockY | draw nockY | F_draw | 비고 |
+|-------------------|------------|-----------|--------|------|
+| 0.8 (하채 약함) | -1.61mm | +27.4mm | 310N | nockY 크게 상방 편향 |
+| 0.9 | -0.39mm | +12.8mm | 326N | |
+| **1.0 (대칭)** | **0.00mm** | **0.00mm** | **344N** | **기본값** |
+| 1.1 (하채 강함) | +0.32mm | -11.6mm | 362N | nockY 하방 편향 |
+| 1.2 | +1.11mm | -22.3mm | 381N | |
+| 1.3 | +2.17mm | -32.3mm | 400N | 솔버 안정 한계 근접 |
+
+**nockY 자기일관 루프**: solveBrace에서 2-3회 반복으로 비대칭 활의 nockY를 자동 결정.
 
 ## 디버깅 가이드
 
