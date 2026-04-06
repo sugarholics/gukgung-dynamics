@@ -2259,10 +2259,11 @@ function simulateRelease(params) {
   const m_limb_each = 0.050;
   const m_siyah_each = 0.010;
   const m_string = params.stringMass || 0.005;
-  // 활채 유효질량 계수: tapered beam 1차 모드 기반 0.17
-  // 균일 보 0.236 → 국궁 테이퍼(근부 두꺼움) → 질량 근부 집중 → 유효질량↓
-  // 시위 체인은 앵커+nock에 핀되어 있으므로 자유도가 제한적 → Klopsteg 유효질량에 포함 유지
-  const m_eff_limb = 2 * (0.17 * m_limb_each + m_siyah_each) + m_string / 3;
+  // 활채 유효질량 계수: tapered beam 1차 모드형상 적분 0.123
+  // h(s)=h₀(1-0.55s/L), w(s)=w₀(1-0.3s/L) → 정적 처짐 모드 적분
+  // 균일 보 0.236 → 테이퍼 보 0.123 (질량이 근부 집중, 선단 경량)
+  // 시위 체인은 앵커+nock에 핀 → Klopsteg 유효질량에 포함 유지
+  const m_eff_limb = 2 * (0.123 * m_limb_each + m_siyah_each) + m_string / 3;
   const zeta_limb = params.dampingRatio || 0.02;
 
   // 3) 만작 상태 초기화
