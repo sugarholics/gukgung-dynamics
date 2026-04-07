@@ -68,6 +68,12 @@ const DEFAULT_PARAMS = {
   // 활채 비틂 (torsion) — 시위 z-오프셋에 의한 면외 비틂
   torsionalGJ: 33.4,      // 비틂 강성 GJ (N·m²) — 등방성 FRP 기준. 복합재 UD: 5~8
 
+  // 조준 및 줌손 위치
+  aimAngleY: 0,           // 조준 앙각 (°) — 활 전체를 위로 기울임 (장거리 사격)
+  aimAngleZ: 0,           // 조준 횡각 (°) — 활 전체를 좌우로 기울임 (바람 보정)
+  gripOffsetY: 0,         // 줌손 y-오프셋 (m) — 음수=아랫장집기, 양수=윗장집기
+  armLength: 0.75,        // 줌팔 길이 (m) — pushAngle 계산용
+
   // 화살 물리 (Spine 기반 카본 튜브)
   arrowLength: 0.82,          // 화살 전체 길이 (m) — 오니~촉 끝
   arrowMass: 0.025,           // 총 질량 (kg) — 슬라이더: 0.020~0.035
@@ -2633,6 +2639,20 @@ function simulateRelease(params) {
       phase2Data.J_angular = arrowState._J_angular || 0;
       phase2Data.I_CoM = arrowState._I_CoM || 0;
 
+      // 조준각 + pushAngle → Phase 2에 전달
+      // 조준각: 화살축(nock→촉) 기준으로 활 전체를 기울임
+      const aimYRad = (params.aimAngleY || 0) * Math.PI / 180;
+      const aimZRad = (params.aimAngleZ || 0) * Math.PI / 180;
+      // pushAngle: gripOffsetY에 의한 미는 방향 변화 (아랫장집기 → 위로)
+      const gripOff = params.gripOffsetY || 0;
+      const armLen = params.armLength || 0.75;
+      const pushAngleY = gripOff !== 0 ? Math.atan2(-gripOff, armLen) : 0; // 아래 잡으면 위로 밈
+      // 총 보정각 = 조준각 + pushAngle
+      phase2Data.aimAngleY = aimYRad + pushAngleY;
+      phase2Data.aimAngleZ = aimZRad;
+      phase2Data.pushAngleY_deg = pushAngleY * 180 / Math.PI;
+      phase2Data.aimAngleY_deg = (params.aimAngleY || 0) + phase2Data.pushAngleY_deg;
+
       phase2Data.t_separation = t * 1000;
       phase2Data.bowVibParams = vibParams;
       phase2Data.modes = modes;
@@ -2825,17 +2845,27 @@ function computeModalArrowShape(phase2Data, arrowProps, t_post_sec) {
   const N = 12;
   const g = 9.81;
 
-  // CoM 탄도 (3D)
-  const cx = CoM.x + CoM.vx * t_post_sec;
-  const cy = CoM.y + CoM.vy * t_post_sec - 0.5 * g * t_post_sec * t_post_sec;
-  const cz = (CoM.z || 0) + (CoM.vz || 0) * t_post_sec; // z: 중력 없음
+  // CoM 탄도 (3D) — 조준각 반영
+  // 활 좌표계의 CoM 속도를 조준 좌표계로 회전
+  const aimY = phase2Data.aimAngleY || 0; // y-조준각 + pushAngle (rad)
+  const aimZ = phase2Data.aimAngleZ || 0; // z-조준각 (rad)
+  // 회전 적용: vx,vy를 aimY로 회전, vx,vz를 aimZ로 회전
+  const cosAy = Math.cos(aimY), sinAy = Math.sin(aimY);
+  const cosAz = Math.cos(aimZ), sinAz = Math.sin(aimZ);
+  const vx0 = CoM.vx * cosAy - CoM.vy * sinAy;  // aimY 회전
+  const vy0 = CoM.vx * sinAy + CoM.vy * cosAy;
+  const vx1 = vx0 * cosAz - (CoM.vz||0) * sinAz; // aimZ 회전
+  const vz0 = vx0 * sinAz + (CoM.vz||0) * cosAz;
+  const cx = CoM.x + vx1 * t_post_sec;
+  const cy = CoM.y + vy0 * t_post_sec - 0.5 * g * t_post_sec * t_post_sec;
+  const cz = (CoM.z || 0) + vz0 * t_post_sec;
 
   // 비행 각도 블렌딩 (x-y면)
   // angular impulse에 의한 초기 각속도 반영: 분리 직후 축이 ω₀로 회전
   const omega_0 = phase2Data.omega0_angular || 0;
-  const axisAngle_t = axisAngle + omega_0 * t_post_sec; // 각속도에 의한 축 회전
-  const vy_t = CoM.vy - g * t_post_sec;
-  const velocityAngle = Math.atan2(vy_t, CoM.vx);
+  const axisAngle_t = axisAngle + aimY + omega_0 * t_post_sec; // 조준각 + 각속도 축 회전
+  const vy_t = vy0 - g * t_post_sec;
+  const velocityAngle = Math.atan2(vy_t, vx1);
   const alignTime = 0.05; // 깃 복원 시상수 (공력 근사)
   const blend = Math.min(1, t_post_sec / alignTime);
   let angleDiff = velocityAngle - axisAngle_t;
@@ -3853,9 +3883,10 @@ export default function KoreanBow3D() {
                     <div>CoM 속도: <b style={{ color: "#88ffcc" }}>vx={cm.vx.toFixed(1)}</b> vy={cm.vy.toFixed(2)} vz={(cm.vz||0).toFixed(2)} m/s</div>
                     <div>CoM 위치: <b style={{ color: "#88ddaa" }}>x={((cm.x||0)*100).toFixed(1)}</b> y={((cm.y||0)*100).toFixed(1)} z={((cm.z||0)*1000).toFixed(1)}mm</div>
                     <div>화살 속력: <b style={{ color: "#88ffcc" }}>{speed.toFixed(1)} m/s</b></div>
-                    <div>발사각(x-y): <b style={{ color: "#ffaaff" }}>{angleXY.toFixed(2)}°</b></div>
+                    <div>발사각(x-y): <b style={{ color: "#ffaaff" }}>{angleXY.toFixed(2)}°</b>{p2.aimAngleY_deg ? <span style={{color:"#aa88ff"}}> +조준{p2.aimAngleY_deg.toFixed(1)}°</span> : null}</div>
                     <div>발사각(z): <b style={{ color: "#ddaaff" }}>{angleZ.toFixed(3)}°</b></div>
                     <div>화살축 기울기: <b style={{ color: "#aaddff" }}>{axisAng.toFixed(2)}°</b></div>
+                    {p2.pushAngleY_deg ? <div>pushAngle(줌위치): <b style={{ color: "#aa88ff" }}>{p2.pushAngleY_deg.toFixed(2)}°</b></div> : null}
                     <div style={{ color: "#999", marginTop: 4, marginBottom: 2 }}>--- 에너지/진동 ---</div>
                     <div>효율 (Klopsteg): <b style={{ color: "#ffdd88" }}>{(eta * 100).toFixed(1)}%</b></div>
                     <div>paradox A1y: <b style={{ color: "#ff8888" }}>{A1y.toFixed(1)} mm</b></div>
@@ -4199,6 +4230,9 @@ export default function KoreanBow3D() {
               사법 (射法)
             </div>
             {[
+              { key: "aimAngleY", label: "조준 앙각", unit: "°", min: -10, max: 45, step: 0.5, toVal: v => v, fromVal: v => v },
+              { key: "aimAngleZ", label: "조준 횡각", unit: "°", min: -10, max: 10, step: 0.5, toVal: v => v, fromVal: v => v },
+              { key: "gripOffsetY", label: "줌 높이 오프셋", unit: "mm", min: -60, max: 20, step: 1, toVal: v => v * 1000, fromVal: v => v / 1000 },
               { key: "gripTwistTorque", label: "줌손 비틀기 토크", unit: "N·m", min: 0, max: 1.0, step: 0.05, toVal: v => v, fromVal: v => v },
               { key: "gripTwistDamping", label: "비틀기 감쇠비", unit: "", min: 0.01, max: 0.30, step: 0.01, toVal: v => v, fromVal: v => v },
               { key: "thumbReleaseForce", label: "엄지 이탈 횡력", unit: "N", min: 0, max: 20, step: 0.5, toVal: v => v, fromVal: v => v },
