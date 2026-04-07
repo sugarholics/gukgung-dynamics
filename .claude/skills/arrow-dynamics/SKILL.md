@@ -47,7 +47,7 @@ Nock 위치: nockingPoint = (nockX, nockY + nockingOffset) 보간
 ```
 
 - m_coupled = m_eff_limb + m_arrow (Klopsteg 결합질량)
-- m_eff_limb = 2×(0.17×m_limb + m_siyah) + m_string/3
+- m_eff_limb = 2×(0.123×m_limb + m_siyah) + m_string/3
 - T_dynamic = |F_restore| × m_arrow / m_coupled
 
 ### y축 발사각 (impulse ratio)
@@ -67,6 +67,15 @@ Jx = ∫Fx dt                              ← 시위력 x성분 (음수)
 줌손 z회전:  I_z × θ̈_z = M_wrist - k_z(T) × θ_z - c_z × θ̇_z
 엄지 횡력:   F_thumb = thumbReleaseForce × exp(-t/1ms), +z 방향
 활채 z접촉:  줌통 ±6cm에서 z > -limbWidth/2 시 페널티
+```
+
+### 조준 + pushAngle
+
+```
+aimAngleY: 조준 앙각 (°) → Phase 2 CoM 속도를 회전
+aimAngleZ: 조준 횡각 (°) → Phase 2 z-탄도
+pushAngleY = atan2(-gripOffsetY, armLength) → 아랫장집기 4cm ≈ +3.1°
+총 보정 = aimAngleY + pushAngleY → CoM 속도 회전 후 탄도 계산
 ```
 
 ### 시간 단위

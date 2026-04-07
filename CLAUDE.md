@@ -196,6 +196,9 @@ computeModalArrowShape(phase2Data, arrowProps, t)  ← Phase 2 모달 형상 계
 | gripTwistDamping | 0.08 | z축 회전 감쇠비 (줌손 마찰) | 잔신 감쇠 |
 | thumbReleaseForce | 5.0 N | 엄지 이탈 횡력 (+z, τ=1ms) | paradox 구동, Spine 민감도 |
 | torsionalGJ | 33.4 N·m² | 활채 비틂 강성 (등방성 FRP) | 앵커 z-편향, paradox |
+| aimAngleY | 0° | 조준 앙각 (장거리 사격) | Phase 2 탄도 방향 |
+| aimAngleZ | 0° | 조준 횡각 (바람 보정) | Phase 2 z-탄도 |
+| gripOffsetY | 0 m | 줌 높이 오프셋 (아랫장집기=-) | pushAngle → 발사각 보정 |
 
 **검증된 물리량** (기본 파라미터):
 - Brace height: 15.0 cm ✓
